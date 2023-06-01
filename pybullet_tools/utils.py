@@ -3686,7 +3686,7 @@ def plan_base_motion(body, end_conf, base_limits, obstacles=[], direct=False,
             yield q
             # TODO: should wrap these joints
 
-    def collision_fn(q):
+    def collision_fn(q, **kwargs):
         # TODO: update this function
         set_base_values(body, q)
         return any(pairwise_collision(body, obs, max_distance=max_distance) for obs in obstacles)
