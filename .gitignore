@@ -3,6 +3,7 @@
 **/*.bazel
 temp
 **/*.so
+.vscode
 
 # windows extension build
 *.pyd
