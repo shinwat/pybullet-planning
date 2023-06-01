@@ -1,7 +1,8 @@
 import math
 import numpy as np
-from .pr2_utils import get_gripper_joints,close_until_collision, set_joint_position, get_max_limit, \    get_min_limit, joints_from_names
-from .utils import PIPI, TRANSPARENT, approximate_as_prism, clone_body, get_joint_positions, Euler, Pose, get_link_pose, get_link_subtree, link_from_name, multiply, point_from_pose, set_all_color, set_joint_positions, set_pose, unit_pose
+from .pr2_utils import get_gripper_joints,close_until_collision, set_joint_position, get_max_limit, \
+            get_min_limit, joints_from_names
+from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, get_joint_positions, Euler, Pose, get_link_pose, get_link_subtree, link_from_name, multiply, point_from_pose, set_all_color, set_joint_positions, set_pose, unit_pose
 
 TIAGO_URDF = "models/tiago_description/tiago.urdf"
 
@@ -70,7 +71,6 @@ def set_arm_conf(robot, conf):
 
 def get_top_grasps(body, under=False, tool_pose=TOOL_POSE, body_pose=unit_pose(),
                    max_width=MAX_GRASP_WIDTH, grasp_length=GRASP_LENGTH):
-    # TODO: rename the box grasps
     center, (w, l, h) = approximate_as_prism(body, body_pose=body_pose)
     reflect_z = Pose(euler=[0, math.pi, 0])
     translate_z = Pose(point=[0, 0, h / 2 - grasp_length])
@@ -98,9 +98,6 @@ def compute_grasp_width(robot, body, grasp_pose, **kwargs):
 
 def create_gripper(robot, visual=True):
     link_name = TIAGO_GRIPPER_ROOT
-    # gripper = load_pybullet(os.path.join(get_data_path(), 'pr2_gripper.urdf'))
-    # gripper = load_pybullet(os.path.join(get_models_path(), 'pr2_description/pr2_l_gripper.urdf'), fixed_base=False)
-    # pybullet.error: Error receiving visual shape info for the DRAKE_PR2
     links = get_link_subtree(robot, link_from_name(robot, link_name))
     gripper = clone_body(robot, links=links, visual=False, collision=False)  # TODO: collision to True
     if not visual:

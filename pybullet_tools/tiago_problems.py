@@ -30,12 +30,8 @@ class Problem(object):
         self.fixed = list(filter(lambda b: b not in all_movable, get_bodies()))
         self.gripper = None
     def get_gripper(self, visual=True):
-        # upper = get_max_limit(problem.robot, get_gripper_joints(problem.robot, 'left')[0])
-        # set_configuration(gripper, [0]*4)
-        # dump_body(gripper)
         if self.gripper is None:
             self.gripper = create_gripper(self.robot, visual=visual)
-            # return ValueError("Gripper not provided.")
         return self.gripper
     def remove_gripper(self):
         if self.gripper is not None:
