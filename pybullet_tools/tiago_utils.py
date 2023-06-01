@@ -60,6 +60,9 @@ def set_group_conf(robot, group, positions):
 def get_arm_joints(robot):
     return get_group_joints(robot, 'arm')
 
+def get_torso_arm_joints(robot):
+    return joints_from_names(robot, TIAGO_GROUPS['torso'] + TIAGO_GROUPS['arm'])
+
 def get_gripper_joints(robot):
     return get_group_joints(robot, 'gripper')
 
