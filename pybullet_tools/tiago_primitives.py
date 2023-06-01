@@ -8,7 +8,8 @@ import numpy as np
 from .ikfast.tiago.ik import get_tool_pose, is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
 from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
-from .utils import Attachment, BodySaver, Pose2d, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_configuration, get_custom_limits, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui
+from .utils import Attachment, BodySaver, Pose2d, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_configuration, get_custom_limits, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui
+from .utils import Pose as Posee
 
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
@@ -471,8 +472,9 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
         
     def fn(arm, obj, pose1, pose2, grasp, base_conf):
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
-        gripper_pose = multiply(pose1.value, invert(grasp.value))
-        approach_pose = multiply(pose1.value, invert(grasp.approach))
+        gripper_pose = Posee(point=pose1.value[0] + grasp.value[0], euler=euler_from_quat(grasp.value[1])) # grasp value is in world frame
+        approach_pose = multiply(pose1.value, invert(grasp.approach)) # approach value is in object pose frame
+        approach_pose = Posee(point=approach_pose[0] + grasp.value[0], euler=euler_from_quat(grasp.value[1])) # grasp value is in world frame
         arm_link = get_gripper_link(robot)
         arm_joints = get_arm_joints(robot)
         default_conf = grasp.carry

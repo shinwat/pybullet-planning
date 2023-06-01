@@ -2,7 +2,7 @@ import math
 import numpy as np
 from .pr2_utils import get_gripper_joints,close_until_collision, set_joint_position, get_max_limit, \
             get_min_limit, joints_from_names
-from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, euler_from_quat, get_angle, get_difference, get_joint_positions, Euler, Pose, get_link_pose, get_link_subtree, link_from_name, multiply, point_from_pose, set_all_color, set_joint_positions, set_pose, unit_pose
+from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, euler_from_quat, wrap_angle, get_angle, get_unit_vector, get_difference, get_joint_positions, Euler, Pose, get_link_pose, get_link_subtree, get_pose, get_pose_distance, get_unit_vector, link_from_name, multiply, point_from_pose, quat_from_pose, set_all_color, set_joint_positions, set_pose, unit_pose
 
 TIAGO_URDF = "models/tiago_description/tiago.urdf"
 
@@ -19,7 +19,7 @@ TIAGO_GROUPS = {
 }
 
 GRASP_LENGTH = 0.
-GRIPPER_MARGIN = 0.04
+GRIPPER_MARGIN = 0.1 #TODO: maybe smaller?
 MAX_GRASP_WIDTH = np.inf
 TOOL_POSE = Pose(euler=Euler(pitch=PI))
 #TODO: find actual values
@@ -97,17 +97,19 @@ def get_top_grasps(body, under=False, tool_pose=TOOL_POSE, body_pose=unit_pose()
 
 def get_align(body, target_pose, num_samples=5, tool_pose=TOOL_POSE, body_pose=unit_pose(),
                    grasp_length=GRASP_LENGTH, safety_margin=GRIPPER_MARGIN):
-    _, (w, l, h) = approximate_as_prism(body, body_pose=body_pose)
+    center, (w, l, h) = approximate_as_prism(body, body_pose=body_pose)
     side = max(w, l)
     reflect_z = Pose(euler=[0, math.pi, 0])
     translate_z = Pose(point=[0, 0, h / 2 - grasp_length]) # lift gripper by grasp length
 
     current_pose = get_pose(body)
     angle = get_angle(point_from_pose(target_pose.value), point_from_pose(current_pose))
-    translate_offset = Pose(point=[-(side/2+safety_margin)*math.cos(angle), -(side/2+safety_margin)*math.sin(angle), 0])
-    rotate_z = Pose(euler=[0, 0, angle + math.pi/2])
-    align = multiply(tool_pose, translate_z, rotate_z,
-                        reflect_z, translate_offset, body_pose)
+    translate_center = Pose(point=point_from_pose(body_pose)-center)
+    grasp = multiply(tool_pose, translate_z,
+                        reflect_z, translate_center, body_pose)
+    translate_offset = np.array([(side/2+safety_margin)*math.cos(angle), (side/2+safety_margin)*math.sin(angle), 0])
+    rotate_z = np.array([0, 0, wrap_angle(angle)])
+    align = Pose(point=translate_offset, euler=rotate_z)
     return align
 
 def compute_grasp_width(robot, body, grasp_pose, **kwargs):
