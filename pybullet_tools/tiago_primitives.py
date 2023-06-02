@@ -1,4 +1,5 @@
 import copy
+import math
 import random
 import time
 from itertools import islice, count
@@ -8,9 +9,8 @@ import numpy as np
 from .ikfast.tiago.ik import get_tool_pose, is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
 from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
-from .utils import Attachment, BodySaver, Pose2d, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_configuration, get_custom_limits, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui
+from .utils import Attachment, BodySaver, Pose2d, WorldSaver, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
 from .utils import Pose as Posee
-
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
 GRASP_LENGTH = 0.03
@@ -227,8 +227,7 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
         set_joint_positions(robot, q.joints, q.values) # arm conf
         init_gripper_pose = get_tool_pose(robot)
         gripper_pose = multiply(p.value, invert(g.value))
-        gripper_orientation = multiply(p0.value, invert(g.value))
-        gripper_pose = align_gripper(gripper_pose, gripper_orientation)
+        gripper_pose = align_gripper(gripper_pose, init_gripper_pose)
         approach_pose = get_midpoint_pose(init_gripper_pose, gripper_pose)
         arm_link = get_gripper_link(robot)
         arm_joints = get_arm_joints(robot)
@@ -317,7 +316,7 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
                         print("gripper + ", b)
                     else:
                         print(obj, b)
-                        wait_if_gui()
+                        # wait_if_gui()
                 return
         gripper_pose = multiply(pose.value, invert(grasp.value)) # w_f_g = w_f_o * (g_f_o)^-1
         default_conf = grasp.carry
@@ -340,7 +339,7 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
                 set_joint_positions(robot, arm_joints, default_conf)
                 if any(pairwise_collision(robot, b) for b in obstacles + [obj]):
                     continue
-                print('IR attempts:', count)
+                #print('IR attempts:', count)
                 yield (bq,)
                 break
             else:
