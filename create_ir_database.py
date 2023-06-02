@@ -4,7 +4,7 @@ import argparse
 import random
 import time
 
-from pybullet_tools.pr2_utils import set_arm_conf, get_other_arm, arm_conf, REST_LEFT_ARM, \
+from pybullet_tools.pr2_utils import create_gripper, set_arm_conf, get_other_arm, arm_conf, REST_LEFT_ARM, \
     get_carry_conf, get_gripper_link, GET_GRASPS, IR_FILENAME, get_database_file, DRAKE_PR2_URDF, \
     set_group_conf, get_group_conf, get_base_pose
 from pybullet_tools.utils import create_box, disconnect, add_data_path, connect, get_movable_joints, get_joint_positions, \
@@ -81,14 +81,20 @@ def create_inverse_reachability(robot, body, table, arm, grasp_type, max_attempt
 #######################################################
 
 class MockProblem(object):
-    def __init__(self, robot, fixed=[], grasp_types=[]):
+    def __init__(self, robot, arm, fixed=[], grasp_types=[]):
         self.robot = robot
         self.fixed = fixed
         self.grasp_types = grasp_types
+        self.gripper = None
+        self.arm = arm
+    def get_gripper(self, arm='left', visual=True):
+        if self.gripper is None:
+            self.gripper = create_gripper(self.robot, self.arm, visual=True)
+        return self.gripper
 
 def create_inverse_reachability2(robot, body, table, arm, grasp_type, max_attempts=500, num_samples=500):
     tool_link = get_gripper_link(robot, arm)
-    problem = MockProblem(robot, fixed=[table], grasp_types=[grasp_type])
+    problem = MockProblem(robot, arm, fixed=[table], grasp_types=[grasp_type])
     placement_gen_fn = get_stable_gen(problem)
     grasp_gen_fn = get_grasp_gen(problem, collisions=True)
     ik_ir_fn = get_ik_ir_gen(problem, max_attempts=max_attempts, learned=False, teleport=True)
@@ -101,7 +107,7 @@ def create_inverse_reachability2(robot, body, table, arm, grasp_type, max_attemp
     start_time = time.time()
     gripper_from_base_list = []
     while len(gripper_from_base_list) < num_samples:
-        [(p,)] = next(placement_gen)
+        (p,) = next(placement_gen)
         (g,) = random.choice(grasps)
         output = next(ik_ir_fn(arm, body, p, g), None)
         if output is None:
