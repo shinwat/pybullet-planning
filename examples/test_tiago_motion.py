@@ -114,6 +114,7 @@ def test_ikfast(tiago):
                 wait_if_gui('Continue?')
             else:
                 wait_for_duration(SLEEP)
+
 #####################################
 
 def main():
@@ -121,10 +122,9 @@ def main():
     add_data_path()
 
     plane = create_floor()
-    table = create_floor()
+    table = create_table()
     set_quat(table, quat_from_euler(Euler(yaw=PI/2)))
     obstacles = [table]
-
     tiago = create_tiago()
 
     base_start = (-2, -2, 0)
@@ -138,7 +138,7 @@ def main():
     set_group_conf(tiago, 'torso', [0.33])
     open_gripper(tiago)
     set_base_values(tiago, base_start)
-
+    
     # test inverse kinematics
     test_ikfast(tiago)
 
@@ -155,5 +155,6 @@ def main():
 
     wait_if_gui('Finish?')
     disconnect()
+
 if __name__ == '__main__':
     main()
