@@ -3446,7 +3446,7 @@ def get_collision_fn(body, joints, obstacles, attachments, self_collisions, disa
         if not all_between(lower_limits, q, upper_limits):
             #print('Joint limits violated')
             if verbose: print(lower_limits, q, upper_limits)
-            return True
+            # return True #TODO: enable
         set_joint_positions(body, joints, q)
         for attachment in attachments:
             attachment.assign()
@@ -3763,6 +3763,14 @@ def sample_placement_on_aabb(top_body, bottom_aabb, top_pose=unit_pose(),
 def sample_placement(top_body, bottom_body, bottom_link=None, **kwargs):
     bottom_aabb = get_aabb(bottom_body, link=bottom_link)
     return sample_placement_on_aabb(top_body, bottom_aabb, **kwargs)
+
+def placement_on_aabb(top_body, bottom_aabb, top_pose=unit_pose()):
+    center, extent = get_center_extent(top_body)
+    z = (bottom_aabb[1] + extent/2.)[2]
+    point = np.array([0, 0, z]) + (get_point(top_body) - center)
+    pose = multiply(Pose(point), top_pose)
+    set_pose(top_body, pose)
+    return pose
 
 #####################################
 

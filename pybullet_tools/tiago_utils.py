@@ -1,7 +1,7 @@
 import math
 import numpy as np
-from .pr2_utils import get_gripper_joints,close_until_collision, set_joint_position, get_max_limit, \
-            get_min_limit, joints_from_names
+from .pr2_utils import close_until_collision, set_joint_position, get_max_limit, \
+    get_min_limit, joints_from_names
 from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, euler_from_quat, wrap_angle, get_angle, get_unit_vector, get_difference, get_joint_positions, Euler, Pose, get_link_pose, get_link_subtree, get_pose, get_pose_distance, get_unit_vector, link_from_name, multiply, point_from_pose, quat_from_pose, set_all_color, set_joint_positions, set_pose, unit_pose
 
 TIAGO_URDF = "models/tiago_description/tiago.urdf"
@@ -130,7 +130,7 @@ def create_gripper(robot, visual=True):
 
 def get_midpoint_pose(start_pose, end_pose):
     difference = get_difference(point_from_pose(start_pose), point_from_pose(end_pose))
-    print("Diff: ",difference)
+    # print("Diff: ",difference)
     return Pose(point=difference/2+point_from_pose(start_pose),
                 euler=euler_from_quat(quat_from_pose(start_pose))
                 )
