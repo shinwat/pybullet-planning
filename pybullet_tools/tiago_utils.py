@@ -7,7 +7,7 @@ from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, euler_from
 TIAGO_URDF = "models/tiago_description/tiago.urdf"
 
 EXTENDED_ARM = [0., 0., 0., 0., 0., 0., 0.]
-TUCKED_ARM = [1.5, 0.59, 0.06, 1.0, -1.7, 0., 0.] # TODO: get actual values
+TUCKED_ARM = [1.5, 1., 0.06, 1.0, -1.7, 0., 0.] # TODO: get actual values
 
 TIAGO_GROUPS = {
     'base': ['x', 'y', 'theta'],

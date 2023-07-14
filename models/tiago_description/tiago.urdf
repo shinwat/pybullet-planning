@@ -366,7 +366,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="meshes/torso/torso_fix.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="meshes/torso/torso_fix.stl" scale="1 1 1"/>
       </geometry>
       <material name="LightGrey"/>
     </visual>
@@ -428,14 +428,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="meshes/torso/torso_lift_with_arm.stl" scale="0.001 0.001 0.001"/>
+        <mesh filename="meshes/torso/torso_lift_with_arm.stl" scale="1 1 1"/>
       </geometry>
       <material name="White"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="meshes/torso/torso_lift_collision.dae" scale="0.001 0.001 0.001"/>
+        <mesh filename="meshes/torso/torso_lift_collision.dae" scale="1 1 1"/>
       </geometry>
       <material name="LightGrey"/>
     </collision>
