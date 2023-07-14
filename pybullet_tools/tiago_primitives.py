@@ -1,21 +1,29 @@
+from __future__ import annotations
+from collections import OrderedDict
 import copy
 import math
 import random
 import time
+import os
 from itertools import islice, count
 
 import numpy as np
+import robomimic.utils.file_utils as FileUtils
 
-from .ikfast.tiago.ik import get_tool_pose, is_ik_compiled, tiago_inverse_kinematics
+from .ikfast.tiago.ik import BASE_FRAME, get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
 from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
-from .utils import Attachment, BodySaver, Pose2d, WorldSaver, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
+from .utils import RED, UNIT_LIMITS, Attachment, BodySaver, Pose2d, WorldSaver, create_sphere, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_limits, get_joint_position, get_joint_positions, get_joint_velocities, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_time_step, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_point, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
 from .utils import Pose as Posee
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
 GRASP_LENGTH = 0.03
 APPROACH_DISTANCE = 0.1 + GRASP_LENGTH
 SELF_COLLISIONS = False
+CONTROL_FREQ = 20.0 # Hz
+MAX_HORIZON = 200
+SUCCESS_DISTANCE = 0.05 # m
+PLATE_VERTICES = [[-0.135, -0.135],[0.135,-0.135],[0.135,0.135],[-0.135,0.135]]
 
 ##################################################
 
@@ -178,6 +186,277 @@ class Detach(Command):
     def __repr__(self):
         return '{}({},{})'.format(self.__class__.__name__, get_body_name(self.robot), get_name(self.body))
     
+#TODO: move to utils
+def normalize_joint(joint, lower, upper):
+    tmp = (joint - lower) / (upper - lower)
+    new_lower, new_upper = UNIT_LIMITS
+    return (tmp - 0.5)*(new_upper - new_lower)
+
+#TODO: move to utils
+def unnormalize_joint(joint, lower, upper):
+    new_lower, new_upper = UNIT_LIMITS
+    tmp = joint/(new_upper - new_lower) + 0.5
+    return tmp*(upper - lower) + lower
+
+#TODO: move to utils
+def get_normalized_arm_joint_positions(body):
+    return tuple(
+            normalize_joint(
+                get_joint_position(body, joint), 
+                *get_joint_limits(body, joint)) for joint in  get_arm_joints(body)
+        )
+
+#TODO: move to utils
+def get_unnormalized_arm_joint_positions(body, positions):
+    joints = get_arm_joints(body)
+    return tuple(
+            unnormalize_joint(
+                positions[idx], 
+                *get_joint_limits(body, joints[idx])) for idx in range(len(joints))
+        )
+
+#TODO: move to utils
+def is_point_in_plate(point):
+    return int(is_point_in_polygon(point, PLATE_VERTICES))
+
+def get_state(robot, body):
+    # The coordinates of the tool of the pusher
+    tool_pos, tool_orn = get_tool_pose_wrt_base(robot) # wrt base frame
+    # The coordinates of the point of contact (is this redundant with object pose?)
+    # collision_info = get_closest_points(robot, body, max_distance=1)[0] # returns 0 above 1m threshold
+    # contact_pos, _ = get_pose_wrt_base(robot, ((collision_info.positionOnB), (0,0,0,0))) # wrt base frame
+    # The coordinates of the object to be moved
+    world_from_obj = get_pose(body)
+    obj_pos, obj_orn = get_pose_wrt_base(robot, world_from_obj) # wrt base frame
+    # put it all together
+    ret = {}
+    ret["tool_pos"] = np.array(tool_pos) # 3
+    ret["tool_orn"] = np.array(tool_orn) # 4
+    ret["obj_pos"] = np.array(obj_pos) # 3
+    ret["obj_orn"] = np.array(obj_orn) # 4
+    return ret
+
+def flatten_state(state):
+    flat = []
+    for feature in state:
+        flat.append(state[feature])
+    return np.concatenate(flat)
+
+def get_goal(robot, pose):
+    # The coordinates of the goal position
+    goal_pos, _ = get_pose_wrt_base(robot, pose) # wrt base frame
+    return {"obj_pos" : np.array(goal_pos)}
+
+class Push(Command):
+    def __init__(self, robot, body, pose, trajectory, directory=None, policy_path=None, baseline_path=None, evaluate_path=None):
+        self.robot = robot
+        self.body = body
+        # self.link = link_from_name(self.robot, TIAGO_TOOL_FRAME)
+        self.pose = pose
+        self.trajectory = trajectory
+        self.directory = directory
+        self.policy_path = policy_path
+        self.baseline_path = baseline_path
+        self.evaluate_path = evaluate_path
+        # TODO: pose argument to maintain same object
+    def apply(self, state, **kwargs):
+        self.trajectory.apply(state, **kwargs)
+    def control(self, **kwargs):
+        saver = WorldSaver()
+        sim_dt = get_time_step()
+        sim_time = 0.0
+        while True:
+            policy_paths = []
+            if (self.policy_path is not None): # policy-based skill
+                policy_paths.append(self.policy_path)
+            if (self.baseline_path is not None): # baseline policy-based skill
+                policy_paths.append(self.baseline_path)
+            results = {} # dictionary to save results
+            horizon = 250 #TODO: shouldn't be static
+            joints = get_arm_joints(self.robot)
+            for path in policy_paths:
+                with os.scandir(path) as it: #TODO: if using many seeds, need to go into individual folders
+                    for entry in it:
+                        if entry.name.endswith(".pth") and entry.is_file(): # make sure it's a checkpoint file
+                            policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=entry.path)
+                            # get the goal
+                            goal = get_goal(self.robot, self.pose.value)
+                            # print(goal["obj_pos"])
+
+                            # start the policy
+                            policy.start_episode()
+
+                            # step through the rollout
+                            for step_i in range(horizon):
+                                
+                                # get the observation directly from the state
+                                obs = get_state(self.robot, self.body)
+                                
+                                # get the action
+                                action = policy(ob=obs, goal=goal)
+
+                                # ge the absolute joint values
+                                action += tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot))
+                                # unnormalize it #DELTA
+                                # action = np.array(get_unnormalized_arm_joint_positions(self.robot, action)) #DELTA
+
+                                # roll out action in the environment
+                                for i, _ in enumerate(joint_controller_hold(self.robot, joints, action)):
+                                    step_simulation()
+                                    sim_time += sim_dt
+                                    # time.sleep(0.01) # to slow down visualization
+                                    if sim_time > 1/CONTROL_FREQ: # should it loop through until the joint values are reached?
+                                        sim_time = 0.0
+                                        break
+
+                                # if done or success, end before horizon is reached
+                                if (get_pose_distance(get_pose(self.body), self.pose.value)[0] < SUCCESS_DISTANCE): #TODO: fix
+                                    print('goal reached at step: ', step_i)
+                                    # wait_if_gui()
+                                    break # exit for loop
+                            print('Using learned policy: ', entry.name)
+                            # evaluate by checking that block is in plate
+                            eval = is_point_in_plate(get_pose(self.body)[0])
+                            print('success: ', eval)
+                            results[entry.path] = eval # store result in dict
+                            set_point(create_sphere(radius=0.02, mass=0.01, color=RED, collision=False), self.pose.value[0]) # visualize goal in simulator
+                            # restore world for every policy
+                            # wait_if_gui()
+                            saver.restore()
+            states = []
+            obj_poses = []
+            action_infos = []
+            init_pose = get_pose(self.body)
+            # print('initial pose: ', get_pose_wrt_base(self.robot, get_pose(self.body))) #wrt robot frame
+            sim_time = 0.0
+            # initial state info
+            states.append(flatten_state(get_state(self.robot, self.body)))
+            old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+            for conf in self.trajectory.path: # scripted skill
+                for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
+                    step_simulation()
+                    sim_time += sim_dt
+                    if sim_time > 1/CONTROL_FREQ:
+                        sim_time = 0
+                        # action info
+                        # action = get_normalized_arm_joint_positions(self.robot) # normalize TODO: should take conf.values instead? #DELTA
+                        # getting the delta: #DELTA
+                        joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+                        action = tuple(map(lambda x, y: x-y, joint_state, old_joint_state)) #DELTA
+                        old_joint_state = joint_state #DELTA
+
+                        # action info
+                        info = {}
+                        info["actions"] = np.array(action)
+                        action_infos.append(info)
+
+                        # state info
+                        state = get_state(self.robot, self.body)
+                        state = flatten_state(state)
+                        states.append(state)
+
+                        # obj pose info
+                        obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
+                        obj_poses.append(obj_pose)
+            # evaluate TAMP trajectory
+            print('using motion planner script.')
+            eval = is_point_in_plate(get_pose(self.body)[0])
+            print('success: ', eval)
+            results['scripted'] = eval
+
+            # save evaluation into a file
+            if self.evaluate_path is not None:
+                # create a file with a timestamp
+                if not os.path.exists(self.evaluate_path):
+                    print("Making new directory at {}".format(self.evaluate_path))
+                    os.makedirs(self.evaluate_path)
+                t1, t2 = str(time.time()).split(".")
+                eval_path = os.path.join(self.evaluate_path, "eval_{}_{}.npz".format(t1, t2))
+                np.savez(
+                    eval_path,
+                    results=results
+                )
+
+            if self.directory == None:
+                break
+            # retroactively add final object pose as goal
+            # NOTE: it must be relative to the robot frame
+            obj_pos, _ = obj_pose
+            obj_pos = [np.array(obj_pos)]
+            # crop the trajectory to the step where the object stops moving
+            last_index = 0
+            for i, pose in enumerate(obj_poses):
+                if is_pose_close(pose, obj_pose):
+                    last_index = i
+                    break
+            if last_index == 0: #object didn't move, so don't save trajectory
+                print('object did not move.')
+                break
+            print('goal pose: ', obj_poses[last_index])
+            print('should be same as: ', obj_pos)
+            print('cutting trajectory to ', last_index)
+            states = states[:last_index]
+            action_infos = action_infos[:last_index]
+            # statistics
+            print('action: ', action_infos[0])
+            print('actions length: ', len(action_infos))
+            print('state: ', states[0])
+            print('states length: ', len(states))
+            print('timesteps: ', i)
+            # check if trajectory is too long
+            if len(states) > MAX_HORIZON:
+                print('trajectory is too long.')
+                break
+            # check if object moves or is close to goal
+            #TODO: check if block tips over
+            distance_moved = get_pose_distance(get_pose(self.body), init_pose)[0] 
+            distance_to_goal = get_pose_distance(get_pose(self.body), self.pose.value)[0]
+            print("object moved distance (m): ", distance_moved)
+            print("distance to goal (m): ", distance_to_goal)
+
+            # if distance_moved < 0.05 and distance_to_goal > 0.01: # should check instead if in area?
+            #     print('Push failed.')
+            #     # wait_if_gui()
+            #     saver.restore()
+            #     # pose2d = base_values_from_pose(self.pose.value)
+            #     # angle = pose2d[2] + np.random.uniform(-math.pi/4, math.pi/4)
+            #     # new_pose = pose_from_pose2d((pose2d[0],pose2d[1], angle))
+            #     #TODO: should use the other pose instead
+            #     if attempts > 5:
+            #         print("Push failed; max attempt reached.")
+            #         break
+            #     else: # randomly rotate the object
+            #         new_pose = (init_pose[0], z_rotation(np.random.uniform(-math.pi, math.pi)))
+            #         set_pose(self.body, new_pose)
+            #         attempts += 1
+            #         continue
+
+            print('Saving data to disk.')
+            # create a directory with a timestamp
+            if not os.path.exists(self.directory):
+                print("Making new directory at {}".format(self.directory))
+                os.makedirs(self.directory)
+            t1, t2 = str(time.time()).split(".")
+            ep_directory = os.path.join(self.directory, "ep_{}_{}".format(t1, t2))
+            assert not os.path.exists(ep_directory)
+            print("Making folder at {}".format(ep_directory))
+            os.makedirs(ep_directory)
+            # t1, t2 = str(time.time()).split(".")
+            state_path = os.path.join(ep_directory, "state_{}_{}.npz".format(t1, t2))
+            env_name = 'Push'
+            np.savez(
+                state_path,
+                states=np.array(states),
+                action_infos=action_infos,
+                goal=np.array(obj_pos), #TODO: should be obj_pose[last_index]?
+                env=env_name,
+            )
+            break
+    def reverse(self):
+        return self.trajectory.reverse()
+    def __repr__(self):
+        return '{}({},{})'.format(self.__class__.__name__, get_body_name(self.robot), get_name(self.body))
+
 ##################################################
 
 # TODO: make it work for side grasp as well
@@ -212,7 +491,6 @@ def get_align_gen(problem, collisions=False):
     return fn
 
 ##################################################
-#TODO: make into generator?
 # needs to pass 2 tests:
 #   1. does the arm reach pose p? --> IK
 #   2. are there objects along the path? --> collision check
@@ -226,7 +504,7 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
         bq.assign # base conf
         set_joint_positions(robot, q.joints, q.values) # arm conf
         init_gripper_pose = get_tool_pose(robot)
-        gripper_pose = multiply(p.value, invert(g.value))
+        gripper_pose = multiply(p.value, invert(g.value)) #TODO: which? p.value | multiply(p.value, invert(g.value))
         gripper_pose = align_gripper(gripper_pose, init_gripper_pose)
         approach_pose = get_midpoint_pose(init_gripper_pose, gripper_pose)
         arm_link = get_gripper_link(robot)
@@ -607,7 +885,7 @@ def get_ik_ir_only_gen(problem, max_attempts=25, collisions=True,learned=False, 
 ##################################################
 
 def control_commands(commands, **kwargs):
-    wait_if_gui('Control?')
+    # wait_if_gui('Control?')
     disable_real_time()
     enable_gravity()
     for i, command in enumerate(commands):
