@@ -248,17 +248,14 @@ def get_goal(robot, pose):
     return {"obj_pos" : np.array(goal_pos)}
 
 class Push(Command):
-    def __init__(self, robot, body, pose, trajectory, directory=None, policy_path=None, baseline_path=None, evaluate_path=None):
+    def __init__(self, robot, body, pose, trajectory, directory=None, policy_dir=None, evaluate_path=None):
         self.robot = robot
         self.body = body
-        # self.link = link_from_name(self.robot, TIAGO_TOOL_FRAME)
         self.pose = pose
         self.trajectory = trajectory
         self.directory = directory
-        self.policy_path = policy_path
-        self.baseline_path = baseline_path
+        self.policy_dir = policy_dir
         self.evaluate_path = evaluate_path
-        # TODO: pose argument to maintain same object
     def apply(self, state, **kwargs):
         self.trajectory.apply(state, **kwargs)
     def control(self, **kwargs):
@@ -266,19 +263,15 @@ class Push(Command):
         sim_dt = get_time_step()
         sim_time = 0.0
         while True:
-            policy_paths = []
-            if (self.policy_path is not None): # policy-based skill
-                policy_paths.append(self.policy_path)
-            if (self.baseline_path is not None): # baseline policy-based skill
-                policy_paths.append(self.baseline_path)
             results = {} # dictionary to save results
             horizon = 250 #TODO: shouldn't be static
             joints = get_arm_joints(self.robot)
-            for path in policy_paths:
-                with os.scandir(path) as it: #TODO: if using many seeds, need to go into individual folders
-                    for entry in it:
-                        if entry.name.endswith(".pth") and entry.is_file(): # make sure it's a checkpoint file
-                            policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=entry.path)
+            if self.policy_dir is not None:
+                for root, _, files in os.walk(self.policy_dir):#with os.scandir(path) as it: #TODO: if using many seeds, need to go into individual folders
+                    for file in files:#for entry in it:
+                        if file.endswith('.pth'):#if entry.name.endswith(".pth") and entry.is_file(): # make sure it's a checkpoint file
+                            policy_path = os.path.join(root, file)
+                            policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)#entry.path
                             # get the goal
                             goal = get_goal(self.robot, self.pose.value)
                             # print(goal["obj_pos"])
@@ -314,11 +307,11 @@ class Push(Command):
                                     print('goal reached at step: ', step_i)
                                     # wait_if_gui()
                                     break # exit for loop
-                            print('Using learned policy: ', entry.name)
+                            print('Using learned policy: ', file)
                             # evaluate by checking that block is in plate
                             eval = is_point_in_plate(get_pose(self.body)[0])
                             print('success: ', eval)
-                            results[entry.path] = eval # store result in dict
+                            results[policy_path] = eval # store result in dict
                             set_point(create_sphere(radius=0.02, mass=0.01, color=RED, collision=False), self.pose.value[0]) # visualize goal in simulator
                             # restore world for every policy
                             # wait_if_gui()
