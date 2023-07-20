@@ -10,7 +10,7 @@ from pybullet_tools.tiago_utils import EXTENDED_ARM, TIAGO_GROUPS, TIAGO_URDF, T
 from pybullet_tools.pr2_primitives import Pose, Conf, Command, State
 from pybullet_tools.tiago_primitives import Attach, Detach, GripperCommand, Push, get_align_gen, get_grasp_gen, get_ik_fn, get_ik_ir_gen, get_ik_ir_traj_gen, get_ik_traj_fn, get_motion_gen, get_push_gen, get_stable_gen, control_commands, apply_commands
 from pybullet_tools.kuka_primitives import BodyConf, Command, get_free_motion_gen, get_holding_motion_gen
-from pybullet_tools.utils import WorldSaver, clone_body, create_box, enable_gravity, connect, dump_world, get_aabb, get_max_limit, get_pose, joints_from_names, placement_on_aabb, point_from_pose, pose_from_base_values, pose_from_pose2d, sample_placement, set_base_values, set_joint_positions, set_point, set_pose, \
+from pybullet_tools.utils import RED, WorldSaver, clone_body, create_box, create_sphere, enable_gravity, connect, dump_world, get_aabb, get_max_limit, get_pose, joints_from_names, multiply, placement_on_aabb, point_from_pose, pose_from_base_values, pose_from_pose2d, sample_placement, set_base_values, set_joint_positions, set_point, set_pose, \
     draw_global_system, draw_pose, set_camera_pose, Point, set_default_camera, stable_z, \
     BLOCK_URDF, load_model, wait_if_gui, disconnect, DRAKE_IIWA_URDF, wait_if_gui, update_state, disable_real_time, HideOutput
 from pybullet_tools.utils import Pose as Posee
@@ -54,7 +54,8 @@ def plan(problem, max_attempts, collisions, directory, policy, slide, move_base)
                 [bt,] = bc.commands # base trajectory
                 [at1,] = ac1.commands # arm trajectory grasp
                 print(bq.values)
-                output2 = push_gen_fn('', block, pose0, pose1, g, goal_conf, aq)
+                pose2 = Pose(block, multiply(pose1.value, g.value))
+                output2 = push_gen_fn('', block, pose0, pose2, g, goal_conf, aq)
                 if output2 is None:
                     print("Failed to find push path.")
                 else:
@@ -81,7 +82,7 @@ def plan(problem, max_attempts, collisions, directory, policy, slide, move_base)
                     return (bt,close_gripper,at1,push,push.reverse(),open_gripper)
     return None
 
-def picking(grasp_type='top'):
+def pushing(grasp_type='top'):
     initial_conf = get_carry_conf(grasp_type)
     tiago = create_tiago()
     table = create_table(height=TABLE_MAX_Z)
@@ -109,6 +110,7 @@ def main(display='execute'): # control | execute | step
     parser.add_argument('-p','--policy', type=str, default=None, help='path to the policy if available')
     parser.add_argument('-static', action='store_true', help='base is static')
     parser.add_argument('-direct', action='store_true', help='no GUI')
+    parser.add_argument('-random', action='store_true', help='random goal placement')
     parser.add_argument('-x','--x', type=float, default=0.0, help='Goal displacement in x')
     parser.add_argument('-y','--y', type=float, default=0.0, help='Goal displacement in y')
     args = parser.parse_args()
@@ -118,14 +120,19 @@ def main(display='execute'): # control | execute | step
     disable_real_time()
     draw_global_system()
     with HideOutput():
-        problem = picking()
+        problem = pushing()
     set_default_camera(distance=2)
     dump_world()
 
+    if args.random:
+        x, y = (random.uniform(-0.27, 0.27), random.uniform(-0.27, 0.27))
+    else:
+        x, y = (args.x, args.y)
+    goal = (x, y, TABLE_MAX_Z)
+    set_point(create_sphere(radius=0.02, mass=0.01, color=RED, collision=False), goal) # visualize goal in simulator
     saved_world = WorldSaver()
-    wait_if_gui()
-    push = Point(x=args.x,y=args.y) # amount to push
-    commands = plan(problem, 500, not args.cfree, args.directory, args.policy, push, move_base=not args.static)
+    # wait_if_gui()
+    commands = plan(problem, 25, not args.cfree, args.directory, args.policy, Point(x=x,y=y), move_base=not args.static) # 500 attempts
     
     if (commands is None) or (display is None):
         print('Unable to find a plan!')
