@@ -31,16 +31,23 @@ TIAGO_INFO = IKFastInfo(module_name='tiago.ikfast_tiago_arm', base_link=TORSO_FR
 #####################################
 
 def get_tool_pose(robot):
+    base_from_tool = get_tool_pose_wrt_base(robot)
+    #quat = quat if quat.real >= 0 else -quat  # solves q and -q being same rotation
+    world_from_base = get_link_pose(robot, link_from_name(robot, BASE_FRAME))
+    return multiply(world_from_base, base_from_tool)
+
+def get_tool_pose_wrt_base(robot):
     from .ikfast_tiago_arm import get_fk
     ik_joints = get_arm_joints(robot) #TODO: should be get_torso_arm_joints
     conf = get_joint_positions(robot, ik_joints)
     assert len(conf) == 7 #TODO: should be 8 with torso
     torso_from_tool = compute_forward_kinematics(get_fk, conf)
     base_from_torso = get_relative_pose(robot, link_from_name(robot, TORSO_FRAME), link_from_name(robot, BASE_FRAME))# static transform from torso to 
-    base_from_tool = multiply(base_from_torso, torso_from_tool)
-    #quat = quat if quat.real >= 0 else -quat  # solves q and -q being same rotation
+    return multiply(base_from_torso, torso_from_tool)
+
+def get_pose_wrt_base(robot, pose):
     world_from_base = get_link_pose(robot, link_from_name(robot, BASE_FRAME))
-    return multiply(world_from_base, base_from_tool)
+    return multiply(invert(world_from_base), pose)
 
 #####################################
 
