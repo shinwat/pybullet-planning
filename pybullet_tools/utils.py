@@ -31,6 +31,8 @@ sys.path.append(os.path.join(directory, '../motion'))
 from motion_planners.rrt_connect import birrt
 from motion_planners.meta import direct_path
 
+import matplotlib.pyplot as plt
+
 #from ..motion.motion_planners.rrt_connect import birrt, direct_path
 
 # from future_builtins import map, filter
@@ -1249,6 +1251,43 @@ def get_pitch(point):
 def get_yaw(point):
     dx, dy = point[:2]
     return np.math.atan2(dy, dx)
+
+def get_static_image(gripper_pose):
+    width = 84 # same size as robomimic demo file
+    height = 84 # TODO: how big should image be?
+
+    fov = 60
+    aspect = width / height
+    near = 0.02
+    far = 0.1
+    gripper_pos = gripper_pose[0] # TODO: eye position is bottom of EE; can be obstructed by gripper
+    # target_pos = [gripper_pos[0], gripper_pos[1], gripper_pos[2]-0.05]
+    gripper_yaw = euler_from_quat(gripper_pose[-1])[-1]*180/PI # gripper yaw angle in degrees
+    view_matrix = p.computeViewMatrixFromYawPitchRoll(gripper_pos, 0.1, gripper_yaw, -90, 0, 2)
+    projection_matrix = p.computeProjectionMatrixFOV(fov, aspect, near, far)
+    images = p.getCameraImage(width,
+                          height,
+                          view_matrix,
+                          projection_matrix,
+                          shadow=True,
+                          renderer=p.ER_BULLET_HARDWARE_OPENGL)
+    rgb_opengl = np.reshape(images[2], (height, width, 4)) * 1. / 255.
+    return rgb_opengl
+
+
+def set_figure(gripper_pose):
+    rgb_opengl = get_static_image(gripper_pose)
+    plt.figure()
+    plt_im = plt.imshow(rgb_opengl)
+    plt.title('RGB OpenGL3')
+    return plt_im
+
+def show_image(plt_im, gripper_pose):
+    rgb_opengl = get_static_image(gripper_pose)
+    plt_im.set_array(rgb_opengl)
+    plt.draw()
+    rgb_opengl = rgb_opengl[:,:,:3] # don't need to save alpha channel
+    return rgb_opengl
 
 def set_camera_pose(camera_point, target_point=np.zeros(3)):
     delta_point = np.array(target_point) - np.array(camera_point)
@@ -4175,7 +4214,10 @@ def inverse_kinematics_helper(robot, link, target_pose, null_space=None):
                                                       physicsClientId=CLIENT)
     else:
         # TODO: calculateInverseKinematics2
-        kinematic_conf = p.calculateInverseKinematics(robot, link, target_point, target_quat, physicsClientId=CLIENT)
+        try:
+            kinematic_conf = p.calculateInverseKinematics(robot, link, target_point, target_quat, physicsClientId=CLIENT)
+        except Exception:
+            return None
     if (kinematic_conf is None) or any(map(math.isnan, kinematic_conf)):
         return None
     return kinematic_conf

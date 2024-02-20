@@ -1,21 +1,31 @@
+from __future__ import annotations
+from collections import OrderedDict
 import copy
 import math
 import random
 import time
+import os
 from itertools import islice, count
 
 import numpy as np
+import robomimic.utils.file_utils as FileUtils
 
-from .ikfast.tiago.ik import get_tool_pose, is_ik_compiled, tiago_inverse_kinematics
+from .ikfast.tiago.ik import get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
-from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
-from .utils import Attachment, BodySaver, Pose2d, WorldSaver, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_joint_positions, set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
+from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_conf, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
+from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, WorldSaver, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_limits, get_joint_position, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_static_image, get_time_step, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_figure, set_joint_positions, set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
 from .utils import Pose as Posee
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
 GRASP_LENGTH = 0.03
 APPROACH_DISTANCE = 0.1 + GRASP_LENGTH
 SELF_COLLISIONS = False
+CONTROL_FREQ = 20.0 # Hz
+MAX_HORIZON = 200
+SUCCESS_DISTANCE = 0.05 # m
+PLATE_VERTICES = [[-0.135, -0.135],[0.135,-0.135],[0.135,0.135],[-0.135,0.135]]
+HOOK_WIDTH = 0.1
+HOOK_LENGTH = 0.2
 
 ##################################################
 
@@ -178,6 +188,283 @@ class Detach(Command):
     def __repr__(self):
         return '{}({},{})'.format(self.__class__.__name__, get_body_name(self.robot), get_name(self.body))
     
+#TODO: move to utils
+def normalize_joint(joint, lower, upper):
+    tmp = (joint - lower) / (upper - lower)
+    new_lower, new_upper = UNIT_LIMITS
+    return (tmp - 0.5)*(new_upper - new_lower)
+
+#TODO: move to utils
+def unnormalize_joint(joint, lower, upper):
+    new_lower, new_upper = UNIT_LIMITS
+    tmp = joint/(new_upper - new_lower) + 0.5
+    return tmp*(upper - lower) + lower
+
+#TODO: move to utils
+def get_normalized_arm_joint_positions(body):
+    return tuple(
+            normalize_joint(
+                get_joint_position(body, joint), 
+                *get_joint_limits(body, joint)) for joint in  get_arm_joints(body)
+        )
+
+#TODO: move to utils
+def get_unnormalized_arm_joint_positions(body, positions):
+    joints = get_arm_joints(body)
+    return tuple(
+            unnormalize_joint(
+                positions[idx], 
+                *get_joint_limits(body, joints[idx])) for idx in range(len(joints))
+        )
+
+#TODO: move to utils
+def is_point_in_plate(point):
+    return int(is_point_in_polygon(point, PLATE_VERTICES))
+
+def get_state(robot, body):
+    tool_pos, tool_orn = get_tool_pose_wrt_base(robot) # wrt base frame
+    world_from_obj = get_pose(body)
+    obj_pos, obj_orn = get_pose_wrt_base(robot, world_from_obj) # wrt base frame
+    ret = {}
+    ret["tool_pos"] = np.array(tool_pos) # 3
+    ret["tool_orn"] = np.array(tool_orn) # 4
+    ret["obj_pos"] = np.array(obj_pos) # 3
+    ret["obj_orn"] = np.array(obj_orn) # 4
+    return ret
+
+def augment_state(obs, robot):
+    image = get_static_image(get_tool_pose(robot))[:,:,:3] 
+    image = np.moveaxis(image, -1, 0) #KLUDGE: for some reason, VisualCore takes channel-first as input?
+    obs["wrist_image"] = image
+    return obs
+
+def flatten_state(state):
+    flat = []
+    for feature in state:
+        flat.append(state[feature])
+    return np.concatenate(flat)
+
+def get_goal(robot, pose):
+    goal_pos, _ = get_pose_wrt_base(robot, pose) # wrt base frame
+    return {"obj_pos" : np.array(goal_pos)}
+
+class Push(Command):
+    def __init__(self, robot, body, pose, trajectory, directory=None, policy_dir=None, evaluate_path=None, collect_dir=None, vision=False):
+        self.robot = robot
+        self.body = body
+        self.pose = pose
+        self.trajectory = trajectory
+        self.directory = directory
+        self.policy_dir = policy_dir
+        self.evaluate_path = evaluate_path
+        self.collect_dir = collect_dir
+        self.vision = vision
+    def apply(self, state, **kwargs):
+        self.trajectory.apply(state, **kwargs)
+    def control(self, **kwargs):
+        saver = WorldSaver()
+        sim_dt = get_time_step()
+        sim_time = 0.0
+        while True:
+            results = {} # dictionary to save results
+            horizon = 250 #TODO: shouldn't be static
+            joints = get_arm_joints(self.robot)
+            if self.collect_dir is not None:
+                #TODO: collect initial config and save in a csv
+                torso_state = get_group_conf(self.robot, 'torso')
+                arm_state = get_group_conf(self.robot, 'arm')
+                gripper_state = get_group_conf(self.robot, 'gripper')
+                base_state = get_group_conf(self.robot, 'base')
+                obj_state = get_pose(self.body) # wrt world frame
+                goal_state = self.pose.value
+                config = np.concatenate((torso_state, arm_state, gripper_state, obj_state[0], obj_state[1], base_state, goal_state[0]))
+                print(config)
+                # save in file
+                if not os.path.exists(self.collect_dir):
+                    print("Making new directory at {}".format(self.collect_dir))
+                    os.makedirs(self.collect_dir)
+                t1, t2 = str(time.time()).split(".")
+                col_path = os.path.join(self.collect_dir, "config_{}_{}".format(t1, t2))
+                np.save(
+                    col_path,
+                    config
+                )
+                break
+            if self.policy_dir is not None:
+                wait_if_gui()
+                for root, _, files in os.walk(self.policy_dir):
+                    for file in files:
+                        if file.endswith('.pth'): # make sure it's a checkpoint file
+                            policy_path = os.path.join(root, file)
+                            policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)
+                            goal = get_goal(self.robot, self.pose.value) # get the goal
+                            policy.start_episode() # start the policy
+                            for step_i in range(horizon): # step through the rollout
+                                obs = get_state(self.robot, self.body) # get the observation directly from the state
+                                if self.vision: # addition for vision
+                                    obs = augment_state(obs, self.robot)
+                                action = policy(ob=obs, goal=goal) # get the action
+                                action += tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) # get the absolute joint values
+
+                                # roll out action in the environment
+                                for i, _ in enumerate(joint_controller_hold(self.robot, joints, action)):
+                                    step_simulation()
+                                    sim_time += sim_dt
+                                    if sim_time > 1/CONTROL_FREQ: # should it loop through until the joint values are reached?
+                                        sim_time = 0.0
+                                        break
+
+                                # if done or success, end before horizon is reached
+                                if (get_pose_distance(get_pose(self.body), self.pose.value)[0] < SUCCESS_DISTANCE): #TODO: fix
+                                    print('goal reached at step: ', step_i)
+                                    break # exit for loop
+                            print('Using learned policy: ', file)
+                            eval = is_point_in_plate(get_pose(self.body)[0]) # evaluate by checking that block is in plate
+                            print('success: ', eval)
+                            results[policy_path] = eval # store result in dict
+                            wait_if_gui()
+                            saver.restore() # restore world for every policy
+            states = []
+            images = []
+            obj_poses = []
+            action_infos = []
+            init_pose = get_pose(self.body)
+            # print('initial pose: ', get_pose_wrt_base(self.robot, get_pose(self.body))) #wrt robot frame
+            sim_time = 0.0
+            states.append(flatten_state(get_state(self.robot, self.body))) # initial state info
+            if self.vision: # initial image info
+                plt_im = set_figure(get_tool_pose(self.robot))
+                rgb = show_image(plt_im, get_tool_pose(self.robot))
+                images.append(rgb)
+            old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+            wait_if_gui()
+            for conf in self.trajectory.path: # scripted skill
+                for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
+                    step_simulation()
+                    sim_time += sim_dt
+                    if sim_time > 1/CONTROL_FREQ:
+                        sim_time = 0
+                        # action info #DELTA
+                        joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+                        action = tuple(map(lambda x, y: x-y, joint_state, old_joint_state)) #DELTA
+                        old_joint_state = joint_state #DELTA
+
+                        # action info
+                        info = {}
+                        info["actions"] = np.array(action)
+                        action_infos.append(info)
+
+                        # state info
+                        state = get_state(self.robot, self.body)
+                        state = flatten_state(state)
+                        states.append(state)
+
+                        # image
+                        if self.vision:
+                            rgb = show_image(plt_im, get_tool_pose(self.robot))
+                            images.append(rgb)
+
+                        # obj pose info
+                        obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
+                        obj_poses.append(obj_pose)
+            # evaluate TAMP trajectory
+            print('using motion planner script.')
+            eval = is_point_in_plate(get_pose(self.body)[0])
+            print('success: ', eval)
+            results['scripted'] = eval
+
+            # also save initial pose and orientation
+            results['x'] = init_pose[0][0]
+            results['y'] = init_pose[0][1]
+            results['theta'] = euler_from_quat(init_pose[1])[2] # yaw around z
+            
+            # save evaluation into a file
+            if self.evaluate_path is not None:
+                # create a file with a timestamp
+                if not os.path.exists(self.evaluate_path):
+                    print("Making new directory at {}".format(self.evaluate_path))
+                    os.makedirs(self.evaluate_path)
+                t1, t2 = str(time.time()).split(".")
+                eval_path = os.path.join(self.evaluate_path, "eval_{}_{}.npz".format(t1, t2))
+                np.savez(
+                    eval_path,
+                    results=results
+                )
+
+            if self.directory == None:
+                break
+            # retroactively add final object pose as goal
+            # NOTE: it must be relative to the robot frame
+            obj_pos, _ = obj_pose
+            obj_pos = [np.array(obj_pos)]
+            # crop the trajectory to the step where the object stops moving
+            last_index = 0
+            for i, pose in enumerate(obj_poses):
+                if is_pose_close(pose, obj_pose):
+                    last_index = i
+                    break
+            if last_index == 0: #object didn't move, so don't save trajectory
+                print('object did not move.')
+                break
+            print('goal pose: ', obj_poses[last_index])
+            print('should be same as: ', obj_pos)
+            print('cutting trajectory to ', last_index)
+            states = states[:last_index]
+            if self.vision:
+                images = images[:last_index]
+            action_infos = action_infos[:last_index]
+            # statistics
+            print('action: ', action_infos[0])
+            print('actions length: ', len(action_infos))
+            print('state: ', states[0])
+            print('states length: ', len(states))
+            print('timesteps: ', i)
+            # check if trajectory is too long
+            if len(states) > MAX_HORIZON:
+                print('trajectory is too long.')
+                break
+            # check if object moves or is close to goal
+            #TODO: check if block tips over
+            distance_moved = get_pose_distance(get_pose(self.body), init_pose)[0] 
+            distance_to_goal = get_pose_distance(get_pose(self.body), self.pose.value)[0]
+            print("object moved distance (m): ", distance_moved)
+            print("distance to goal (m): ", distance_to_goal)
+
+            print('Saving data to disk.')
+            # create a directory with a timestamp
+            if not os.path.exists(self.directory):
+                print("Making new directory at {}".format(self.directory))
+                os.makedirs(self.directory)
+            t1, t2 = str(time.time()).split(".")
+            ep_directory = os.path.join(self.directory, "ep_{}_{}".format(t1, t2))
+            assert not os.path.exists(ep_directory)
+            print("Making folder at {}".format(ep_directory))
+            os.makedirs(ep_directory)
+            state_path = os.path.join(ep_directory, "state_{}_{}.npz".format(t1, t2))
+            env_name = 'Push'
+            if self.vision:
+                np.savez(
+                    state_path,
+                    states=np.array(states),
+                    images=np.array(images),
+                    action_infos=action_infos,
+                    goal=np.array(obj_pos), #TODO: should be obj_pose[last_index]?
+                    env=env_name,
+                )
+            else:
+                np.savez(
+                    state_path,
+                    states=np.array(states),
+                    action_infos=action_infos,
+                    goal=np.array(obj_pos), #TODO: should be obj_pose[last_index]?
+                    env=env_name,
+                )
+            break
+    def reverse(self):
+        return self.trajectory.reverse()
+    def __repr__(self):
+        return '{}({},{})'.format(self.__class__.__name__, get_body_name(self.robot), get_name(self.body))
+    
 ##################################################
 
 # TODO: make it work for side grasp as well
@@ -265,6 +552,157 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
         return (cmd,)
     return fn
 
+##################################################
+
+# generate hook pose
+#TODO: return Pose object instead of Posee
+def get_hook_gen(problem, collisions=True):
+    def fn(*inputs):
+        o, r, p0, p1 = inputs # p0: current block pose | p1: goal block pose
+        p0.assign()
+        approach_vector = APPROACH_DISTANCE*get_unit_vector([0, 0, -1])
+        x = np.sign(p0.value[0][0] - p1.value[0][0])
+        y = np.sign(p0.value[0][1] - p1.value[0][1])
+        h = Posee(point=Point(
+            x=p0.value[0][0]-HOOK_LENGTH*x,
+            y=p0.value[0][1]+HOOK_WIDTH*y,
+            z=p0.value[0][-1]+GRASP_LENGTH), 
+            euler=Euler(0,0,0))
+        grasp = Grasp('top', r, h, multiply((approach_vector, unit_quat()), h), get_carry_conf('top'))
+        return (h,grasp) # return the pose and the grasp 
+    return fn
+
+# generate sweeping trajectory
+# similar to push_gen except goal is offset by the hook distance
+def get_sweep_gen(problem, collisions=True):
+    robot = problem.robot
+    obstacles = problem.movable if collisions else []
+    def fn(*inputs):
+        _, o, p1, p2, p3, g, bq, q = inputs # p2 is object goal pose, p3 is hook pose
+        blocks = list(filter(lambda b: b != o and b != problem.tools[0], obstacles)) #TODO: remove tools
+        bq.assign # base conf
+        set_joint_positions(robot, q.joints, q.values) # arm conf
+        gripper_pose = Posee(point=Point(
+            x=p3[0][0] + p2.value[0][0] - p1.value[0][0],
+            y=p3[0][1] + p2.value[0][1] - p1.value[0][1],
+            z=p3[0][-1]),
+            euler=euler_from_quat(get_tool_pose(robot)[-1])) # keep the gripper orientation
+        print(gripper_pose)
+        arm_link = get_gripper_link(robot)
+        arm_joints = get_arm_joints(robot)
+        approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, gripper_pose)
+        if (approach_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
+            print('Approach IK failure', approach_conf)
+            return None
+        approach_conf = get_joint_positions(robot, arm_joints)
+        attachment = g.get_attachment(problem.robot)
+        attachments = {attachment.child: attachment}
+        resolutions = 0.05**np.ones(len(arm_joints))
+        set_joint_positions(robot, q.joints, q.values)
+        approach_path = plan_direct_joint_motion(robot, arm_joints, approach_conf, attachments=attachments.values(),
+                                                obstacles=blocks, self_collisions=SELF_COLLISIONS,
+                                                resolutions=resolutions/2.)
+        if approach_path is None:
+            print("No approach path found.")
+            return None
+        path = approach_path #TODO:+ push_path
+        mt = create_trajectory(robot, arm_joints, path)
+        cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
+        return (cmd,)
+    return fn
+
+# new ik_ir_traj_gen to account for length of the hook
+def get_hook_ik_ir_traj_gen(problem, max_attempts=25, collisions=True,learned=False, teleport=False, **kwargs):
+    ir_sampler = get_ir_sampler(problem, collisions=collisions, learned=learned, max_attempts=max_attempts, **kwargs)
+    ik_fn = get_ik_arm_fn(problem, collisions=collisions, teleport=teleport, **kwargs)
+    grasp_fn = get_grasp_gen(problem, collisions=collisions)
+    def gen(*inputs):
+        arm, hook, g1, block, p1, p2, p3, _ = inputs
+        p3 = Pose(hook, p3) #KLUDGE: pretend like the object is where the hook moves to
+        p3.assign()
+        (g2,) = grasp_fn(hook)[0]
+        ir_generator = ir_sampler(arm, hook, p3, g2)
+        attempts = 0
+        while True:
+            if max_attempts <= attempts:
+                if not p3.init:
+                    print("pose not initialized")
+                    return
+                attempts = 0
+                yield None
+            attempts += 1
+            try:
+                ir_outputs = next(ir_generator)
+            except StopIteration:
+                return
+            if ir_outputs is None:
+                print("no IR found")
+                continue
+            new_inputs = (arm, hook, p3, g2)
+            ik_outputs = ik_fn(*(new_inputs + ir_outputs))
+            if ik_outputs is None:
+                continue
+            print('IK attempts:', attempts)
+            yield ir_outputs + ik_outputs
+            return
+    return gen
+
+def get_ik_arm_fn(problem, custom_limits={}, collisions=True, teleport=False):
+    robot = problem.robot
+    obstacles = problem.fixed if collisions else []
+    if is_ik_compiled():
+        print('Using ikfast for inverse kinematics')
+    else:
+        print('Using pybullet for inverse kinematics')
+        
+    def fn(arm, obj, pose, grasp, base_conf):
+        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)} # it doesn't check for table collision?
+        gripper_pose = multiply(pose.value, invert(grasp.value))
+        approach_pose = multiply(pose.value, invert(grasp.approach))
+        arm_link = get_gripper_link(robot)
+        arm_joints = get_arm_joints(robot)
+        default_conf = grasp.carry
+        pose.assign()
+        base_conf.assign()
+        open_gripper(robot)
+        set_joint_positions(robot, arm_joints, default_conf)
+        grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
+        if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
+            if grasp_conf is not None:
+               print('Grasp IK failure', grasp_conf)
+            return None
+        approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
+        if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
+            if approach_conf is not None:
+                print('Approach IK failure', approach_conf)
+            return None
+        approach_conf = get_joint_positions(robot, arm_joints)
+        attachment = grasp.get_attachment(problem.robot)
+        attachments = {attachment.child: attachment}
+        if teleport:
+            path = [default_conf, approach_conf, grasp_conf]
+        else:
+            resolutions = 0.05**np.ones(len(arm_joints))
+            grasp_path = plan_direct_joint_motion(robot, arm_joints, grasp_conf, attachments=attachments.values(),
+                                                  obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
+                                                  custom_limits=custom_limits, resolutions=resolutions/2.)
+            if grasp_path is None:
+                print('Grasp path failure')
+                return None
+            set_joint_positions(robot, arm_joints, default_conf)
+            approach_path = plan_joint_motion(robot, arm_joints, approach_conf, attachments=attachments.values(),
+                                              obstacles=obstacles, self_collisions=SELF_COLLISIONS,
+                                              custom_limits=custom_limits, resolutions=resolutions,
+                                              restarts=2, iterations=25, smooth=25)
+            if approach_path is None:
+                print('Approach path failure')
+                return None
+            path = approach_path + grasp_path
+        mt = create_trajectory(robot, arm_joints, path)
+        cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
+        arm_conf = Conf(robot, arm_joints, grasp_conf)
+        return (arm_conf,cmd,)
+    return fn
 ##################################################
 
 def get_stable_gen(problem, collisions=True, **kwargs):
@@ -607,7 +1045,7 @@ def get_ik_ir_only_gen(problem, max_attempts=25, collisions=True,learned=False, 
 ##################################################
 
 def control_commands(commands, **kwargs):
-    wait_if_gui('Control?')
+    #wait_if_gui('Control?')
     disable_real_time()
     enable_gravity()
     for i, command in enumerate(commands):
