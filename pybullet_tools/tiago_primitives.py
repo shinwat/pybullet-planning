@@ -13,7 +13,7 @@ import robomimic.utils.file_utils as FileUtils
 from .ikfast.tiago.ik import get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
 from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_conf, get_group_joints, get_midpoint_pose, get_top_grasps, open_gripper
-from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, WorldSaver, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_limits, get_joint_position, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_static_image, get_time_step, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_figure, set_joint_positions, set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
+from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, WorldSaver, connect, euler_from_quat, add_fixed_constraint, all_between, approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, enable_gravity, enable_real_time, flatten_links, get_body_name, get_closest_points, get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, get_joint_limits, get_joint_position, get_joint_positions, get_link_pose, get_min_limit, get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_static_image, get_time_step, get_unit_vector, interpolate_poses, inverse_kinematics, invert, is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, remove_fixed_constraint, sample_placement, set_base_values, set_figure, set_joint_positions, set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
 from .utils import Pose as Posee
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
@@ -249,7 +249,7 @@ def get_goal(robot, pose):
     return {"obj_pos" : np.array(goal_pos)}
 
 class Push(Command):
-    def __init__(self, robot, body, pose, trajectory, directory=None, policy_dir=None, evaluate_path=None, collect_dir=None, vision=False):
+    def __init__(self, robot, body, pose, trajectory, directory=None, policy_dir=None, evaluate_path=None, collect_dir=None, vision=False, bootstrap=False):
         self.robot = robot
         self.body = body
         self.pose = pose
@@ -259,6 +259,7 @@ class Push(Command):
         self.evaluate_path = evaluate_path
         self.collect_dir = collect_dir
         self.vision = vision
+        self.bootstrap = bootstrap
     def apply(self, state, **kwargs):
         self.trajectory.apply(state, **kwargs)
     def control(self, **kwargs):
@@ -299,6 +300,15 @@ class Push(Command):
                             policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)
                             goal = get_goal(self.robot, self.pose.value) # get the goal
                             policy.start_episode() # start the policy
+                            feasibility = policy.get_value(ob=get_state(self.robot, self.body), goal=goal)
+                            print(feasibility)
+                            states = []
+                            images = []
+                            obj_poses = []
+                            action_infos = []
+                            init_pose = get_pose(self.body)
+                            states.append(flatten_state(get_state(self.robot, self.body))) # initial state info
+                            old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
                             for step_i in range(horizon): # step through the rollout
                                 obs = get_state(self.robot, self.body) # get the observation directly from the state
                                 if self.vision: # addition for vision
@@ -312,6 +322,31 @@ class Push(Command):
                                     sim_time += sim_dt
                                     if sim_time > 1/CONTROL_FREQ: # should it loop through until the joint values are reached?
                                         sim_time = 0.0
+                                        #TODO: save states here
+
+                                        # action info #DELTA
+                                        joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+                                        action = tuple(map(lambda x, y: x-y, joint_state, old_joint_state)) #DELTA
+                                        old_joint_state = joint_state #DELTA
+
+                                        # action info
+                                        info = {}
+                                        info["actions"] = np.array(action)
+                                        action_infos.append(info)
+
+                                        # state info
+                                        state = get_state(self.robot, self.body)
+                                        state = flatten_state(state)
+                                        states.append(state)
+
+                                        # image
+                                        if self.vision:
+                                            rgb = show_image(plt_im, get_tool_pose(self.robot))
+                                            images.append(rgb)
+
+                                        # obj pose info
+                                        obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
+                                        obj_poses.append(obj_pose)
                                         break
 
                                 # if done or success, end before horizon is reached
@@ -322,61 +357,70 @@ class Push(Command):
                             eval = is_point_in_plate(get_pose(self.body)[0]) # evaluate by checking that block is in plate
                             print('success: ', eval)
                             results[policy_path] = eval # store result in dict
+                            results[policy_path+"/mean"] = np.mean(feasibility) # store result in dict
+                            results[policy_path+"/diff"] = abs(np.diff(feasibility)[0]) # store result in dict
                             wait_if_gui()
                             saver.restore() # restore world for every policy
-            states = []
-            images = []
-            obj_poses = []
-            action_infos = []
-            init_pose = get_pose(self.body)
-            # print('initial pose: ', get_pose_wrt_base(self.robot, get_pose(self.body))) #wrt robot frame
-            sim_time = 0.0
-            states.append(flatten_state(get_state(self.robot, self.body))) # initial state info
-            if self.vision: # initial image info
-                plt_im = set_figure(get_tool_pose(self.robot))
-                rgb = show_image(plt_im, get_tool_pose(self.robot))
-                images.append(rgb)
-            old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
-            wait_if_gui()
-            for conf in self.trajectory.path: # scripted skill
-                for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
-                    step_simulation()
-                    sim_time += sim_dt
-                    if sim_time > 1/CONTROL_FREQ:
-                        sim_time = 0
-                        # action info #DELTA
-                        joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
-                        action = tuple(map(lambda x, y: x-y, joint_state, old_joint_state)) #DELTA
-                        old_joint_state = joint_state #DELTA
 
-                        # action info
-                        info = {}
-                        info["actions"] = np.array(action)
-                        action_infos.append(info)
+            if not self.bootstrap:
+                states = []
+                images = []
+                obj_poses = []
+                action_infos = []
+                init_pose = get_pose(self.body)
+                # print('initial pose: ', get_pose_wrt_base(self.robot, get_pose(self.body))) #wrt robot frame
+                sim_time = 0.0
+                states.append(flatten_state(get_state(self.robot, self.body))) # initial state info
+                if self.vision: # initial image info
+                    plt_im = set_figure(get_tool_pose(self.robot))
+                    rgb = show_image(plt_im, get_tool_pose(self.robot))
+                    images.append(rgb)
+                old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+                wait_if_gui()
+                for conf in self.trajectory.path: # scripted skill
+                    for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
+                        step_simulation()
+                        sim_time += sim_dt
+                        if sim_time > 1/CONTROL_FREQ:
+                            sim_time = 0
+                            # action info #DELTA
+                            joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
+                            action = tuple(map(lambda x, y: x-y, joint_state, old_joint_state)) #DELTA
+                            old_joint_state = joint_state #DELTA
 
-                        # state info
-                        state = get_state(self.robot, self.body)
-                        state = flatten_state(state)
-                        states.append(state)
+                            # action info
+                            info = {}
+                            info["actions"] = np.array(action)
+                            action_infos.append(info)
 
-                        # image
-                        if self.vision:
-                            rgb = show_image(plt_im, get_tool_pose(self.robot))
-                            images.append(rgb)
+                            # state info
+                            state = get_state(self.robot, self.body)
+                            state = flatten_state(state)
+                            states.append(state)
 
-                        # obj pose info
-                        obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
-                        obj_poses.append(obj_pose)
-            # evaluate TAMP trajectory
-            print('using motion planner script.')
-            eval = is_point_in_plate(get_pose(self.body)[0])
-            print('success: ', eval)
-            results['scripted'] = eval
+                            # image
+                            if self.vision:
+                                rgb = show_image(plt_im, get_tool_pose(self.robot))
+                                images.append(rgb)
 
-            # also save initial pose and orientation
-            results['x'] = init_pose[0][0]
-            results['y'] = init_pose[0][1]
-            results['theta'] = euler_from_quat(init_pose[1])[2] # yaw around z
+                            # obj pose info
+                            obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
+                            obj_poses.append(obj_pose)
+                # evaluate TAMP trajectory
+                print('using motion planner script.')
+                eval = is_point_in_plate(get_pose(self.body)[0])
+                print('success: ', eval)
+                results['scripted'] = eval
+
+                # also save initial pose and orientation
+                results['x'] = init_pose[0][0]
+                results['y'] = init_pose[0][1]
+                results['theta'] = euler_from_quat(init_pose[1])[2] # yaw around z
+
+                # save initial pose and orientation
+                results['base_x'] = obj_poses[0][0][0]
+                results['base_y'] = obj_poses[0][0][1]
+                results['base_theta'] = euler_from_quat(obj_poses[0][1])[2] # yaw around z
             
             # save evaluation into a file
             if self.evaluate_path is not None:
@@ -504,7 +548,7 @@ def get_align_gen(problem, collisions=False):
 #   1. does the arm reach pose p? --> IK
 #   2. are there objects along the path? --> collision check
 # generates push trajectories
-def get_push_gen(problem, collisions=True, max_attempts=25):
+def get_push_gen(problem, collisions=True, max_attempts=25, policy_dir=None, eval_dir=None):
     robot = problem.robot
     obstacles = problem.movable if collisions else []
     def fn(*inputs):
@@ -512,6 +556,9 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
         blocks = list(filter(lambda b: b != o, obstacles))
         bq.assign # base conf
         set_joint_positions(robot, q.joints, q.values) # arm conf
+        attachment = g.get_attachment(problem.robot)
+        attachments = {attachment.child: attachment}
+        #TODO: get current state, query value function of the given policy
         init_gripper_pose = get_tool_pose(robot)
         gripper_pose = multiply(p.value, invert(g.value))
         gripper_pose = align_gripper(gripper_pose, init_gripper_pose)
@@ -520,24 +567,25 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
         arm_joints = get_arm_joints(robot)
         push_conf = tiago_inverse_kinematics(robot, gripper_pose)
         if (push_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
+            # record_feasibility(0, robot, o, p, policy_dir, eval_dir)
             print('Push IK failure')
             return None
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
+            # record_feasibility(0, robot, o, p, policy_dir, eval_dir)
             print('Approach IK failure')
             return None
         approach_conf = get_joint_positions(robot, arm_joints)
         # print("Tool pose: ", get_tool_pose(robot))
         # set_joint_positions(robot, q.joints, q.values) # default arm conf
         # print("Tool pose: ", get_tool_pose(robot))
-        attachment = g.get_attachment(problem.robot)
-        attachments = {attachment.child: attachment}
         resolutions = 0.05**np.ones(len(arm_joints))
         push_path = plan_direct_joint_motion(robot, arm_joints, push_conf, attachments=attachments.values(),
                                                 obstacles=blocks, self_collisions=SELF_COLLISIONS,
                                                 resolutions=resolutions/2.)
         if push_path is None:
             print("No push path found.")
+            # record_feasibility(0, robot, o, p, policy_dir, eval_dir)
             return None
         set_joint_positions(robot, q.joints, q.values) # default arm conf
         approach_path = plan_direct_joint_motion(robot, arm_joints, approach_conf, attachments=attachments.values(),
@@ -545,13 +593,64 @@ def get_push_gen(problem, collisions=True, max_attempts=25):
                                                 resolutions=resolutions/2.)
         if approach_path is None:
             print("No approach path found.")
+            # record_feasibility(0, robot, o, p, policy_dir, eval_dir)
+            return None
+        if not estimate_feasibility(robot, o, p, policy_dir):
+            print("Not deemed feasible.")
             return None
         path = approach_path + push_path #
         mt = create_trajectory(robot, arm_joints, path)
         cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
+        # record_feasibility(1, robot, o, p, policy_dir, eval_dir)
         return (cmd,)
     return fn
 
+def estimate_feasibility(robot, obj_pose, goal_pose, policy_dir):
+    if policy_dir is None:
+       return True
+    obs = get_state(robot, obj_pose)
+    goal = get_goal(robot, goal_pose.value)
+
+    for root, _, files in os.walk(policy_dir):
+        for file in files:
+            if file.endswith('.pth'):
+                policy_path = os.path.join(root, file)
+                policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)
+                feasibility = policy.get_value(obs, goal)
+                break
+        break
+    if np.mean(feasibility) <  0.101 or abs(np.diff(feasibility)) > 0.015: #0.0196
+        return False
+    return True
+    
+def record_feasibility(result, robot, obj_pose, goal_pose, policy_dir, eval_dir):
+    if (policy_dir is not None):
+        results = {}
+        print("Using the policy's value function to estimate feasibility...")
+        obs = get_state(robot, obj_pose)
+        goal = get_goal(robot, goal_pose.value)
+        for root, _, files in os.walk(policy_dir):
+            for file in files:
+                if file.endswith('.pth'): # make sure it's a checkpoint file
+                    policy_path = os.path.join(root, file)
+                    policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)
+                    feasibility = policy.get_value(obs, goal)
+                    results[policy_path] = result # store result in dict
+                    results[policy_path+"/mean"] = np.mean(feasibility) # store result in dict
+                    results[policy_path+"/diff"] = abs(np.diff(feasibility)[0]) # store result in dict
+        
+        if eval_dir is not None:
+            # create a file with a timestamp
+            if not os.path.exists(eval_dir):
+                print("Making new directory at {}".format(eval_dir))
+                os.makedirs(eval_dir)
+            t1, t2 = str(time.time()).split(".")
+            eval_path = os.path.join(eval_dir, "eval_{}_{}.npz".format(t1, t2))
+            np.savez(
+                eval_path,
+                results=results
+            )
+    return
 ##################################################
 
 # generate hook pose
