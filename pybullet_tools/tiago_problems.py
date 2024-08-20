@@ -6,7 +6,7 @@ from .utils import STATIC_MASS, HideOutput, LockRenderer, Point, Pose, create_bo
 
 class Problem(object):
     def __init__(self, robot, arms=tuple(), movable=tuple(), grasp_types=tuple(),
-                 surfaces=tuple(), sinks=tuple(), stoves=tuple(), tools=tuple(), buttons=tuple(),
+                 surfaces=tuple(), bumps=tuple(), sinks=tuple(), stoves=tuple(), tools=tuple(), buttons=tuple(),
                  goal_conf=None, goal_holding=tuple(), goal_on=tuple(),
                  goal_cleaned=tuple(), goal_cooked=tuple(), costs=False,
                  body_names={}, body_types=[], base_limits=None):
@@ -14,6 +14,7 @@ class Problem(object):
         self.movable = movable
         self.grasp_types = grasp_types
         self.surfaces = surfaces
+        self.bumps = bumps
         self.sinks = sinks
         self.stoves = stoves
         self.tools = tools
@@ -27,7 +28,7 @@ class Problem(object):
         self.body_names = body_names
         self.body_types = body_types
         self.base_limits = base_limits
-        all_movable = [self.robot] + list(self.movable)
+        all_movable = [self.robot] + list(self.movable) + list(self.bumps)
         self.fixed = list(filter(lambda b: b not in all_movable, get_bodies()))
         self.gripper = None
     def get_gripper(self, visual=True):

@@ -4,7 +4,7 @@ from ...tiago_utils import TIAGO_TOOL_FRAME, get_arm_joints, get_gripper_link, g
 
 from ..utils import get_ik_limits, compute_forward_kinematics, compute_inverse_kinematics, select_solution, \
     USE_ALL, USE_CURRENT
-from ...utils import get_relative_pose, multiply, get_link_pose, link_from_name, get_joint_positions, \
+from ...utils import get_link_state, get_relative_pose, multiply, get_link_pose, link_from_name, get_joint_positions, \
     joint_from_name, invert, get_custom_limits, all_between, sub_inverse_kinematics, set_joint_positions, \
     get_joint_positions, pairwise_collision
 from ...ikfast.utils import IKFastInfo
@@ -49,6 +49,12 @@ def get_pose_wrt_base(robot, pose):
     world_from_base = get_link_pose(robot, link_from_name(robot, BASE_FRAME))
     return multiply(invert(world_from_base), pose)
 
+def get_base(robot):
+    return get_link_pose(robot, link_from_name(robot, BASE_FRAME))
+
+def get_tool_vel(robot):
+    link_state = get_link_state(robot, link_from_name(robot, IK_FRAME)) #TODO: wrt base frame
+    return link_state.worldLinkLinearVelocity, link_state.worldLinkAngularVelocity
 #####################################
 
 def is_ik_compiled():

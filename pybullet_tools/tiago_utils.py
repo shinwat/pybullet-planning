@@ -19,7 +19,7 @@ TIAGO_GROUPS = {
 }
 
 GRASP_LENGTH = 0.
-GRIPPER_MARGIN = 0.1 #TODO: maybe smaller?
+GRIPPER_MARGIN = 0.07
 MAX_GRASP_WIDTH = np.inf
 TOOL_POSE = Pose(euler=Euler(pitch=PI))
 #TODO: find actual values

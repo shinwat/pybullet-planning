@@ -2071,14 +2071,15 @@ def has_link(body, name):
 
 LinkState = namedtuple('LinkState', ['linkWorldPosition', 'linkWorldOrientation',
                                      'localInertialFramePosition', 'localInertialFrameOrientation',
-                                     'worldLinkFramePosition', 'worldLinkFrameOrientation'])
+                                     'worldLinkFramePosition', 'worldLinkFrameOrientation',
+                                     'worldLinkLinearVelocity', 'worldLinkAngularVelocity'])
 
 def get_link_state(body, link, kinematics=True, velocity=True):
     # TODO: the defaults are set to False?
     # https://github.com/bulletphysics/bullet3/blob/master/examples/pybullet/pybullet.c
     return LinkState(*p.getLinkState(body, link,
                                      #computeForwardKinematics=kinematics,
-                                     #computeLinkVelocity=velocity,
+                                     computeLinkVelocity=velocity,
                                      physicsClientId=CLIENT))
 
 def get_com_pose(body, link): # COM = center of mass
@@ -2481,6 +2482,11 @@ def create_capsule(radius, height, mass=STATIC_MASS, color=BLUE, **kwargs):
 
 def create_sphere(radius, mass=STATIC_MASS, color=BLUE, **kwargs):
     collision_id, visual_id = create_shape(get_sphere_geometry(radius), color=color, **kwargs)
+    return create_body(collision_id, visual_id, mass=mass)
+
+def create_plate(w, l, h, mass=STATIC_MASS, color=GREEN, **kwargs):
+    collision_id = create_collision_shape(get_box_geometry(w, l, 0.))
+    visual_id = create_visual_shape(get_box_geometry(w, l, h), color=color, **kwargs)
     return create_body(collision_id, visual_id, mass=mass)
 
 def create_plane(normal=[0, 0, 1], mass=STATIC_MASS, color=BLACK, **kwargs):
