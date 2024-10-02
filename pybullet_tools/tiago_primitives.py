@@ -542,12 +542,47 @@ class Push(Command):
                     goal=np.array(goal_pos), #TODO: should be obj_pose[last_index]?
                     env=env_name,
                 )
-            # make another directory with the relabeled trajectory
-            relabeled_directory = os.path.join(self.directory, "relabeled")
-            if not os.path.exists(relabeled_directory):
-                print("Making new directory at {}".format(relabeled_directory))
-                os.makedirs(relabeled_directory)
-            ep_directory = os.path.join(relabeled_directory, "ep_{}_{}".format(t1, t2))
+                # make a directory for the pruned demos
+                pruned_directory = os.path.join(self.directory, "pruned")
+                if not os.path.exists(pruned_directory):
+                    print("Making new directory at {}".format(pruned_directory))
+                    os.makedirs(pruned_directory)
+                ep_directory = os.path.join(pruned_directory, "ep_{}_{}".format(t1, t2))
+                assert not os.path.exists(ep_directory)
+                print("Making folder at {}".format(ep_directory))
+                os.makedirs(ep_directory)
+                state_path = os.path.join(ep_directory, "state_{}_{}.npz".format(t1, t2))
+                env_name = 'Push'
+                np.savez(
+                    state_path,
+                    states=np.array(pruned_states),
+                    action_infos=pruned_action_infos,
+                    goal=np.array(goal_pos),
+                    env=env_name,
+                )
+                # make another directory with the relabeled trajectory
+                relabeled_directory = os.path.join(self.directory, "relabeled")
+                if not os.path.exists(relabeled_directory):
+                    print("Making new directory at {}".format(relabeled_directory))
+                    os.makedirs(relabeled_directory)
+                ep_directory = os.path.join(relabeled_directory, "ep_{}_{}".format(t1, t2))
+                assert not os.path.exists(ep_directory)
+                print("Making folder at {}".format(ep_directory))
+                os.makedirs(ep_directory)
+                state_path = os.path.join(ep_directory, "state_{}_{}.npz".format(t1, t2))
+                env_name = 'Push'
+                np.savez(
+                    state_path,
+                    states=np.array(states),
+                    action_infos=action_infos,
+                    goal=np.array(relabeled_goal_pos),
+                    env=env_name,
+                )
+            expert_directory = os.path.join(self.directory, "expert")
+            if not os.path.exists(expert_directory):
+                print("Making new directory at {}".format(expert_directory))
+                os.makedirs(expert_directory)
+            ep_directory = os.path.join(expert_directory, "ep_{}_{}".format(t1, t2))
             assert not os.path.exists(ep_directory)
             print("Making folder at {}".format(ep_directory))
             os.makedirs(ep_directory)
