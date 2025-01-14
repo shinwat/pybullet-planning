@@ -1078,6 +1078,9 @@ def threaded_input(*args, **kwargs):
         thread.join()
     return data[-1]
 
+def setTimeout(timeout=1):
+    p.setTimeOut(timeout, physicsClientId=CLIENT)
+
 def disconnect():
     # TODO: change CLIENT?
     if CLIENT in CLIENTS:
@@ -3820,6 +3823,49 @@ def placement_on_aabb(top_body, bottom_aabb, top_pose=unit_pose()):
 #####################################
 
 # Reachability
+
+
+def point_in_annulus(x, y, xc, yc, r_min, r_max):
+    """Check if point (x, y) is within the annulus centered at (xc, yc) with radii r_min and r_max."""
+    distance_squared = (x - xc) ** 2 + (y - yc) ** 2
+    return r_min ** 2 <= distance_squared <= r_max ** 2
+
+def sample_reachable_base2(robot, start, end, reachable_range=(0.25, 1.0)):
+    
+    # Distance between the centers
+    d = np.linalg.norm(np.array(start[:2]) - np.array(end[:2]))
+    
+    # Check if there's a possible intersection (loosely, based on outer circles)
+    if d > reachable_range[1]:
+        return None
+    
+    # Define bounding box of the intersecting area
+    min_x = max(start[0] - reachable_range[1], end[0] - reachable_range[1])
+    max_x = min(start[0] + reachable_range[1], end[0] + reachable_range[1])
+    min_y = max(start[1] - reachable_range[1], end[1] - reachable_range[1])
+    max_y = min(start[1] + reachable_range[1], end[1] + reachable_range[1])
+    
+    while True:
+        # Randomly sample a point in the bounding box
+        sampled_x = np.random.uniform(min_x, max_x)
+        sampled_y = np.random.uniform(min_y, max_y)
+        
+        # Check if the point is within the intersecting annuli
+        if point_in_annulus(
+            sampled_x, sampled_y, start[0], start[1], reachable_range[0], reachable_range[1]
+            ) and point_in_annulus(
+                sampled_x, sampled_y, end[0], end[1], reachable_range[0], reachable_range[1]
+                ):
+            yaw = np.random.uniform(*CIRCULAR_LIMITS)
+            base_values = (sampled_x, sampled_y, yaw)
+            return base_values
+
+def custom_pose_generator(robot, start_pose, end_pose, **kwargs):
+    while True:
+        base_values = sample_reachable_base2(robot, start_pose[0], end_pose[0], **kwargs)
+        if base_values is None:
+            break
+        yield base_values
 
 def sample_reachable_base(robot, point, reachable_range=(0.25, 1.0)):
     radius = np.random.uniform(*reachable_range)
