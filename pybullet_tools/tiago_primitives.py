@@ -7,16 +7,19 @@ import time
 import os
 from itertools import islice, count
 from operator import add, sub, truediv, mul
+from statistics import mean
 
 import numpy as np
 import robomimic.utils.file_utils as FileUtils
 
-from .ikfast.tiago.ik import get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, get_tool_vel, is_ik_compiled, tiago_inverse_kinematics
+from .ikfast.tiago.ik import get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, get_tool_vel, \
+    is_ik_compiled, tiago_inverse_kinematics
 from .pr2_primitives import State, Trajectory, create_trajectory
 from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, \
     TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, \
     get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_group_conf, \
-    get_group_joints, get_midpoint_pose, get_top_grasps, learned_pose_generator, open_gripper
+    get_group_joints, get_midpoint_pose, get_top_grasps, is_reachable, open_gripper, perturb_base, \
+    show_heatmap, sort_3d_array_indices_desc
 from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, WorldSaver, \
     connect, custom_pose_generator, euler_from_quat, add_fixed_constraint, all_between, \
     approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, \
@@ -28,9 +31,9 @@ from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, Wor
     is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, \
     link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, \
     plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, \
-    remove_fixed_constraint, sample_placement, set_base_values, set_figure, set_joint_positions, \
-    set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, \
-    unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation
+    remove_fixed_constraint, sample_placement, sample_reachable_base, sample_reachable_base2, set_base_values, set_figure, \
+    set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_from_theta, \
+    unit_pose, unit_quat, wait_for_duration, wait_if_gui, z_rotation, set_joint_positions
 from .utils import Pose as Posee
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
@@ -386,6 +389,10 @@ class Push(Command):
                                 results[policy_checkpoint] = eval # store result in dict
                                 wait_if_gui()
                                 saver.restore() # restore world for every policy
+                    if self.policy_dir.endswith('.pth'):
+                        policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=os.path.abspath(self.policy_dir))
+                        eval, states, action_infos, obj_poses, init_pose = rollout(policy)
+                        saver.restore() # restore world for every policy
                 else:
                     policy = self.policy_dir
                     eval, states, action_infos, obj_poses, init_pose = rollout(policy)
@@ -401,13 +408,10 @@ class Push(Command):
                 states.append(flatten_state(get_state(self.robot, self.body))) # initial state info
                 old_joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
                 wait_if_gui()
-                joint_is_still = obj_is_still = False
                 steps = 0
                 for conf in self.trajectory.path: # scripted skill
                     if steps >= horizon:
                         print('reached maximum horizon.')
-                        break
-                    if joint_is_still and obj_is_still and self.directory is not None:
                         break
                     for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
                         step_simulation()
@@ -418,14 +422,8 @@ class Push(Command):
                             break # controller is reset every control loop
                     # action info
                     joint_state = tuple(get_joint_position(self.robot, joint) for joint in  get_arm_joints(self.robot)) #DELTA
-                    joint_is_still = np.allclose(joint_state, old_joint_state, atol=1e-4, rtol=0)
                     # obj pose info
                     obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
-                    obj_is_still = False if len(obj_poses) == 0 else is_pose_close(obj_poses[-1], obj_pose)
-                    # if both joint state and object pose are still, exit (unless in eval mode)
-                    if joint_is_still and obj_is_still and self.directory is not None:
-                        print("Trajectory is stuck!")
-                        break
 
                     action_delta = list(map(sub, joint_state, old_joint_state)) #DELTA
                     normed_action_delta = list(map(truediv, action_delta, ACTION_NORM_CONST))
@@ -505,6 +503,7 @@ class Push(Command):
             print('cutting trajectory to ', last_index)
             pruned_states = states[:last_index]
             pruned_action_infos = action_infos[:last_index]
+            pruned_goal = obj_poses[last_index][0]
             # if the pruned trajectories contain actions that are too large, don't save
             action_too_large = False
             for action in pruned_action_infos:
@@ -514,6 +513,25 @@ class Push(Command):
                     break
             if action_too_large:
                 break
+
+            if self.directory is not None:
+                expert_directory = os.path.join(self.directory, "expert")
+                if not os.path.exists(expert_directory):
+                    print("Making new directory at {}".format(expert_directory))
+                    os.makedirs(expert_directory)
+                ep_directory = os.path.join(expert_directory, "ep_{}_{}".format(t1, t2))
+                assert not os.path.exists(ep_directory)
+                print("Making folder at {}".format(ep_directory))
+                os.makedirs(ep_directory)
+                state_path = os.path.join(ep_directory, "state_{}_{}.npz".format(t1, t2))
+                env_name = 'Push'
+                np.savez(
+                    state_path,
+                    states=np.array(pruned_states),
+                    action_infos=pruned_action_infos,
+                    goal=np.array([pruned_goal]),
+                    env=env_name,
+                )
 
             pruned_actions = [list(dict.values())[0] for dict in pruned_action_infos]
             trajectory = {
@@ -587,9 +605,22 @@ def get_push_gen(problem, collisions=True, max_attempts=25, policy_dir=None, eva
         arm_joints = get_arm_joints(robot)
         push_conf = tiago_inverse_kinematics(robot, gripper_pose)
         if (push_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
-            # record_feasibility(0, robot, o, p, policy_dir, eval_dir)
             print('Push IK failure')
             return None
+        if eval_dir is not None: # for getting reachability range
+            results = {}
+            results['goal'] = np.linalg.norm(np.array(p.value[0][:-1]) - np.array(bq.values[:-1]))
+            results['gripper'] = np.linalg.norm(np.array(gripper_pose[0][:-1]) - np.array(bq.values[:-1]))
+            # create a file with a timestamp
+            if not os.path.exists(eval_dir):
+                print("Making new directory at {}".format(eval_dir))
+                os.makedirs(eval_dir)
+            t1, t2 = str(time.time()).split(".")
+            eval_path = os.path.join(eval_dir, "eval_{}_{}.npz".format(t1, t2))
+            np.savez(
+                eval_path,
+                results=results
+            )
         resolutions = 0.05**np.ones(len(arm_joints))
         set_joint_positions(robot, q.joints, q.values) # default arm conf
         # get waypoints from start and end poses, and check IK & collisions through each pose
@@ -616,9 +647,9 @@ def get_push_gen(problem, collisions=True, max_attempts=25, policy_dir=None, eva
                 return None
             path += push_path
             sub_inverse_kinematics(robot, arm_joints[0], arm_link, waypoints[i])
-        if not estimate_feasibility(robot, o, p, policy_dir):
-            print("Not deemed feasible.")
-            return None
+        # if not estimate_feasibility(robot, o, p, policy_dir):
+        #     print("Not deemed feasible.")
+        #     return None
         mt = create_trajectory(robot, arm_joints, path)
         cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
         # record_feasibility(1, robot, o, p, policy_dir, eval_dir)
@@ -860,11 +891,11 @@ def iterate_approach_path(robot, gripper, pose, grasp, body=None):
             set_pose(body, multiply(tool_pose, grasp.value))
         yield
 
-#TODO: implement learned sampler for tiago
 def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, learned=True):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
     gripper = problem.get_gripper()
+    reachable_range = (0.45, 0.85)
 
     def gen_fn(arm, obj, pose, grasp):
         pose.assign()
@@ -886,7 +917,7 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
         # if learned:
             # base_generator = learned_pose_generator(robot, gripper_pose, arm=arm, grasp_type=grasp.grasp_type)
         # else:
-        base_generator = uniform_pose_generator(robot, gripper_pose)
+        base_generator = uniform_pose_generator(robot, gripper_pose, reachable_range=reachable_range)
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
         while True:
             count = 0
@@ -914,24 +945,20 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=25, collisions=True,
 
     def gen_fn(arm, obj, pose, end_pose, grasp):
         pose.assign()
-        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
-        for _ in iterate_approach_path(robot, gripper, pose, grasp, body=obj):
-            if any(pairwise_collision(gripper, b) or pairwise_collision(obj, b) for b in approach_obstacles):
-                print('Collision detected!')
-                for b in approach_obstacles:
-                    if pairwise_collision(gripper, b):
-                        print("gripper + ", b)
-                    else:
-                        print(obj, b)
-                return
         gripper_pose = multiply(pose.value, invert(grasp.value)) # w_f_g = w_f_o * (g_f_o)^-1
         default_conf = grasp.carry
         arm_joints = get_arm_joints(robot)
         base_joints = get_group_joints(robot, 'base')
-        if learned and policy_dir is not None:
-            base_generator = learned_pose_generator(robot, pose.value, gripper_pose, end_pose.value, policy_dir, reach_dir, grid_search=grid_search)
+        # KLUDGE: read from file to check if heuristic failed
+        try:
+            f = open("heuristic.txt", "r")
+            heuristic_failed = f.read() == "failed"
+        except Exception:
+            heuristic_failed = False
+        if learned and policy_dir is not None and not heuristic_failed:
+            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, policy_dir, reach_dir, grid_search=grid_search)
         else:
-            base_generator = custom_pose_generator(robot, pose.value, end_pose.value)
+            base_generator = custom_pose_generator(robot, gripper_pose, end_pose.value, start_range=(0.45, 0.85), end_range=(0.48, 0.99))
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
         while True:
             count = 0
@@ -1224,3 +1251,178 @@ def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
                 wait_for_duration(time_step)
         if pause:
             wait_if_gui()
+
+# samples base pose from learned value function
+def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, policy_dir, reach_dir, grid_search, max_attempts=25):
+    while True:
+        x = (-1.2, 1.2)
+        y = x
+        theta = (-math.pi, math.pi)
+        block_reachable_range = (0.48, 0.99)
+        gripper_reachable_range = (0.45, 0.85)
+        phi = (-math.pi, math.pi)
+        if reach_dir is not None: # for reachability test
+            # compare with uniform
+            base_values = sample_reachable_base(robot, point_from_pose(gripper_pose), reachable_range=gripper_reachable_range)
+            goal_is_reachable = is_reachable(base_values, goal_pose, block_reachable_range)
+            print('goal block reachability: ', goal_is_reachable)
+            results = {}
+            if not os.path.exists(reach_dir):
+                print("Making new directory at {}".format(reach_dir))
+                os.makedirs(reach_dir)
+            results['uniform'] = int(goal_is_reachable)
+        for root, _, files in os.walk(policy_dir):
+            for file in files:
+                if file.endswith('.pth'):
+                    policy_path = os.path.join(root, file)
+                    policy, _ = FileUtils.policy_from_checkpoint(ckpt_path=policy_path)
+
+                    if grid_search: # OPTION 1: GRID SEARCH
+                        param1_range = np.linspace(start=x[0], stop=x[-1], num=20)
+                        param2_range = np.linspace(start=y[0], stop=y[-1], num=20)
+                        param3_range = np.linspace(start=theta[0], stop=theta[-1], num=20)
+
+                        def get_metric(params):
+                            feasibility = policy.get_value(
+                                ob=sample_state(params, robot, start_pose, gripper_pose, True), 
+                                goal=sample_goal(params, robot, goal_pose, gripper_pose, True)
+                            )
+                            return feasibility[0]
+
+                        best_metric = 0
+                        best_params = None
+                        grid_data = np.zeros((param1_range.size, param2_range.size, param3_range.size))
+                        start = time.time()
+
+                        for i, param1 in enumerate(param1_range):
+                            for j, param2 in enumerate(param2_range):
+                                for k, param3 in enumerate(param3_range):
+                                    params = (param1, param2, param3)
+                                    metric = get_metric(params)
+                                    grid_data[i, j, k] = metric
+                        end = time.time()
+                        print('execution time (s): ', end-start)
+                        grid = np.max(grid_data, 2) # only x and y
+                        sorted_indices = sort_3d_array_indices_desc(grid_data)
+                        indices = sorted_indices.pop(0)
+                        best_params = (param1_range[indices[0]], param2_range[indices[1]], param3_range[indices[2]])
+                        best_metric = grid_data[indices]
+
+                        # check that the base is in the reachable zone
+                        init_is_reachable = is_reachable(best_params, get_pose(start_pose), block_reachable_range)
+                        print('initial block pose reachability: ', init_is_reachable)
+                        goal_is_reachable = is_reachable(best_params, goal_pose, block_reachable_range)
+                        print('initial block pose reachability: ', goal_is_reachable)
+
+                        # Output the best metric and the corresponding parameters
+                        print('Best metric:', best_metric)
+                        print('Best parameters:', best_params)
+                        print('State: ', sample_state(best_params, robot, start_pose, gripper_pose, True))
+                        print('Goal: ', sample_goal(best_params, robot, goal_pose, gripper_pose, True))
+                        show_heatmap(grid)
+                        learned_base_values = best_params
+
+                    else: # OPTION 2: SMARTER OPTIMIZATION
+                        from scipy.optimize import minimize
+                        bounds = (gripper_reachable_range, (-math.pi, math.pi), (-math.pi, math.pi))
+                        method = 'Nelder-Mead' #'Nelder-Mead' #'L-BFGS-B' #'Powell'
+                        initial_guess = [mean(bound) for bound in bounds]
+                        objective = lambda params, robot, policy, start_pose, gripper_pose, goal_pose: -policy.get_value(
+                            ob=sample_state(params, robot, start_pose, gripper_pose), 
+                            goal=sample_goal(params, robot, goal_pose, gripper_pose)
+                        )
+                        from functools import partial
+                        partial_obj = partial(
+                            objective, 
+                            robot=robot,
+                            policy=policy,
+                            start_pose=start_pose,
+                            gripper_pose=gripper_pose,
+                            goal_pose=goal_pose
+                        )
+                        result = minimize(
+                            partial_obj,
+                            initial_guess,
+                            method=method,
+                            bounds=bounds,
+                            options={'xatol': 1e-6, 'disp': False}
+                        ) #'ftol':0.001, 
+                        (radius, theta, phi) = result.x # convert back to world pose
+                        x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2]
+                        learned_base_values = (x, y, phi)
+                        # check that the base is in the reachable zone
+                        goal_is_reachable = is_reachable(learned_base_values, goal_pose, block_reachable_range)
+                        if reach_dir is not None: # for reachability test
+                            results[policy_path] = int(goal_is_reachable)
+        if reach_dir is not None: # for reachability test
+            t1, t2 = str(time.time()).split(".")
+            col_path = os.path.join(reach_dir, "reachable_{}_{}.npz".format(t1, t2))
+            np.savez(
+                col_path,
+                results=results
+            )
+            time.sleep(0.2) # KLUDGE: give time before program crashes
+            yield None
+        else:
+            if goal_is_reachable:
+                yield learned_base_values
+                wait_if_gui()
+                attempts = 0
+                while True:
+                    if max_attempts <= attempts:
+                        attempts = 0
+                        with open("heuristic.txt", "w") as f:
+                            f.write("failed")
+                        break
+                    attempts += 1
+                    base_values = perturb_base(robot, learned_base_values, reachable_range=(0.0, 0.2))
+                    # print(sample_state(base_values, robot, start_pose, gripper_pose))
+                    yield base_values
+                # revert to baseline
+                while True:
+                    base_values = sample_reachable_base2(robot, point_from_pose(gripper_pose), point_from_pose(goal_pose), start_range=(0.45, 0.85), end_range=(0.48, 0.99))
+                    if base_values is None:
+                        break
+                    yield base_values
+            else: # revert to baseline
+                with open("heuristic.txt", "w") as f:
+                    f.write("failed")
+                while True:
+                    base_values = sample_reachable_base2(robot, point_from_pose(gripper_pose), point_from_pose(goal_pose), start_range=(0.45, 0.85), end_range=(0.48, 0.99))
+                    if base_values is None:
+                        break
+                    yield base_values
+
+def sample_state(params, robot, obj, gripper_pose, grid=False):
+    if grid:
+        base_values = params
+    else:
+        (radius, theta, phi) = params
+        x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2]
+        base_values = (x, y, phi)
+    # set the base conf    
+    bq = Conf(robot, get_group_joints(robot, 'base'), base_values)
+    bq.assign()
+    obs = get_state(robot, obj)
+    # KLUDGE: 1 mm z offset 
+    obj_pos = obs["obj_pos"]
+    obj_pos[-1] -= 0.001
+    obs["obj_pos"] = obj_pos
+    # use gripper_pose as tool_pose instad of using forward kinematics
+    tool_pos, tool_orn = get_pose_wrt_base(robot, gripper_pose)
+    tool_orn = euler_from_quat(tool_orn)
+    obs["tool_pos"] = np.array(tool_pos)
+    obs["tool_orn"] = np.array(tool_orn)
+    return obs
+
+def sample_goal(params, robot, goal_pose, gripper_pose, grid=False):
+    if grid:
+        base_values = params
+    else:
+        (radius, theta, phi) = params
+        x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2]
+        base_values = (x, y, phi)
+    # set the base conf
+    bq = Conf(robot, get_group_joints(robot, 'base'), base_values)
+    bq.assign()
+    return get_goal(robot, goal_pose)
