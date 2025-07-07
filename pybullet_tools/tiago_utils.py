@@ -4,7 +4,7 @@ import math
 import numpy as np
 from .pr2_utils import close_until_collision, set_joint_position, get_max_limit, \
     get_min_limit, joints_from_names
-from .utils import PI, TRANSPARENT, approximate_as_prism, clone_body, euler_from_quat, wrap_angle, \
+from .utils import PI, TRANSPARENT, Pose2d, approximate_as_prism, clone_body, euler_from_quat, wrap_angle, \
     get_angle, unit_from_theta, get_difference, get_joint_positions, Euler, Pose, get_link_pose, \
     get_link_subtree, get_pose, link_from_name, multiply, set_pose, unit_pose, set_all_color, \
     point_from_pose, quat_from_pose, set_joint_positions \
@@ -25,7 +25,7 @@ TIAGO_GROUPS = {
 
 EPSILON = 1e-6
 GRASP_LENGTH = 0.
-GRIPPER_MARGIN = 0.1
+GRIPPER_MARGIN = 0.07
 MAX_GRASP_WIDTH = np.inf
 TOOL_POSE = Pose(euler=Euler(pitch=PI))
 #TODO: find actual values
@@ -49,7 +49,7 @@ def open_gripper(robot):
         set_joint_position(robot, joint, get_max_limit(robot, joint))
 
 def close_gripper(robot):
-    for joint in joints_from_names(robot, TIAGO_GROUPS['arm']):
+    for joint in joints_from_names(robot, TIAGO_GROUPS['gripper']):
         set_joint_position(robot, joint, get_min_limit(robot, joint))
 
 def get_group_joints(robot, group):
@@ -146,21 +146,28 @@ def align_gripper(pose, orientation):
                 euler=euler_from_quat(quat_from_pose(orientation))
                 )
 
-def is_reachable(base_values, goal_pose, reachable_range):
+def is_reachable(base_values, goal_pose, reachable_range, epsilon=0.0):
     goal_to_baseline = np.array(base_values) - np.array(goal_pose[0])
     rb = np.linalg.norm(goal_to_baseline[:-1])
-    return rb > reachable_range[0] and rb < reachable_range[-1]
+    return rb > (reachable_range[0] - epsilon) and rb < (reachable_range[-1] + epsilon)
 
 def get_theta(params, goal_pose):
     theta = math.atan2(goal_pose[0][1] - params[-1], goal_pose[0][0] - params[0])
     return theta
 
-def perturb_base(robot, point, reachable_range=(0.0, 0.2)):
+# KLUDGE: since phi is (-pi, pi), there is a discontinuity at pi which the value function estimates as 0
+def maybe_flip_phi(base_values, start_pose):
+    (x, y, phi) = base_values
+    if x > pose2d_from_pose(get_pose(start_pose))[0] and abs(phi) < np.pi/2:
+        phi = wrap_angle(phi + np.pi)
+    return (x, y, phi)
+
+def perturb_base(robot, point, reachable_range=(0.0, 0.05)):
     #TODO: figure out how much is acceptable amount
     #KLUDGE: it can go outside of the reachability range
     radius = np.random.uniform(*reachable_range)
     x, y = radius*unit_from_theta(np.random.uniform(-np.pi, np.pi)) + point[:2]
-    yaw = np.random.uniform(-np.pi/2, np.pi/2) + point[-1]
+    yaw = wrap_angle(point[-1] + np.random.uniform(-np.pi/20, np.pi/20))
     base_values = (x, y, yaw)
     return base_values
 
@@ -177,3 +184,13 @@ def show_heatmap(grid):
     ax = sns.heatmap(grid.T, linewidth=0.5)
     ax.invert_yaxis()
     plt.show()
+
+def get_gripper_state(pose):
+    pos, quat = pose
+    return (pos[0], pos[1], euler_from_quat(quat)[-1])
+
+def pose2d_from_pose(pose):
+    (point, quat) = pose
+    x, y, _ = point
+    _, _, yaw = euler_from_quat(quat)
+    return Pose2d(x, y, yaw)

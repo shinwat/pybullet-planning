@@ -3830,6 +3830,14 @@ def point_in_annulus(x, y, xc, yc, r_min, r_max):
     distance_squared = (x - xc) ** 2 + (y - yc) ** 2
     return r_min ** 2 <= distance_squared <= r_max ** 2
 
+# Define bounding box of the intersecting area
+def get_bounding_box(start, end, start_range, end_range):    
+    min_x = max(start[0] - start_range[1], end[0] - end_range[1])
+    max_x = min(start[0] + start_range[1], end[0] + end_range[1])
+    min_y = max(start[1] - start_range[1], end[1] - end_range[1])
+    max_y = min(start[1] + start_range[1], end[1] + end_range[1])
+    return min_x, max_x, min_y, max_y
+
 def sample_reachable_base2(robot, start, end, start_range=(0.45, 0.85), end_range=(0.48, 0.99)):
     """Sample a base pose within the intersection of the start and end point reachabilities."""
     # Distance between the centers
@@ -3838,12 +3846,8 @@ def sample_reachable_base2(robot, start, end, start_range=(0.45, 0.85), end_rang
     # Check if there's a possible intersection (loosely, based on outer circles)
     if d > end_range[1]:
         return None
-    
-    # Define bounding box of the intersecting area
-    min_x = max(start[0] - start_range[1], end[0] - end_range[1])
-    max_x = min(start[0] + start_range[1], end[0] + end_range[1])
-    min_y = max(start[1] - start_range[1], end[1] - end_range[1])
-    max_y = min(start[1] + start_range[1], end[1] + end_range[1])
+
+    min_x, max_x, min_y, max_y = get_bounding_box(start, end, start_range, end_range)
     
     while True:
         # Randomly sample a point in the bounding box
