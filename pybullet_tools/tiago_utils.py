@@ -187,10 +187,11 @@ def show_heatmap(grid):
 
 def get_gripper_state(pose):
     pos, quat = pose
-    return (pos[0], pos[1], euler_from_quat(quat)[-1])
+    _, _, yaw = euler_from_quat(quat)
+    return (pos[0], pos[1], np.sin(yaw), np.cos(yaw))
 
 def pose2d_from_pose(pose):
     (point, quat) = pose
     x, y, _ = point
     _, _, yaw = euler_from_quat(quat)
-    return Pose2d(x, y, yaw)
+    return np.array([x, y, np.sin(yaw), np.cos(yaw)])

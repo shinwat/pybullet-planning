@@ -51,9 +51,7 @@ HOOK_WIDTH = 0.1
 HOOK_LENGTH = 0.2
 MAX_JOINT_VELOCITIES = np.array([1.95, 1.95, 2.35, 2.35, 1.95, 1.95, 1.76]) # in rad/s
 ACTION_NORM_CONST = (MAX_JOINT_VELOCITIES / CONTROL_FREQ).tolist()
-GRIPPER_NORM_COST = [0.02, 0.02, 1.76/CONTROL_FREQ]
-MAX_DEVIATION = 0.25
-##################################################
+GRIPPER_NORM_COST = [0.02, 0.02, 0.05, 0.05]
 
 class Pose(object):
     num = count()
@@ -267,16 +265,18 @@ def get_state(robot, body):
     ret["rel_pos"] = np.array(rel_pos) # 3
     return ret
 
-def get_state_wrt_world(robot, body):
-    tool_pose = pose2d_from_pose(get_tool_pose(robot))
-    obj_pose = pose2d_from_pose(get_pose(body))
-    robot_pose = pose2d_from_pose(get_base(robot))
-    # rel_pos = tuple(map(lambda x, y: x-y, obj_pos, tool_pos))
+def get_state_wrt_base(robot, body):
+    tool_pose = pose2d_from_pose(get_tool_pose_wrt_base(robot))
+    obj_pose = pose2d_from_pose(get_pose_wrt_base(robot, get_pose(body)))
     ret = {}
-    ret["tool_pose"] = np.array(tool_pose) # 3
-    ret["obj_pose"] = np.array(obj_pose) # 3
-    ret["robot_pose"] = np.array(robot_pose) # 3
+    ret["tool_pose"] = np.array(tool_pose) # 4
+    ret["obj_pose"] = np.array(obj_pose) # 4
     return ret
+
+def get_goal_wrt_base(robot, pose):
+    goal_pos, _ = get_pose_wrt_base(robot, pose)
+    goal_pos = np.array(goal_pos)
+    return goal_pos[:-1]
 
 def get_goal_wrt_world(pose):
     goal_pos, _ = pose
@@ -334,7 +334,7 @@ class Push(Command):
         log_dict = None
         while True:
             results = {}
-            goal = get_goal_wrt_world(self.pose.value)
+            goal = get_goal_wrt_base(self.robot, self.pose.value)
             horizon = EVAL_HORIZON if self.evaluate and self.directory is None else MAX_HORIZON
             joints = get_arm_joints(self.robot)
             if self.collect_dir is not None: # collect initial config and save in a csv
@@ -360,7 +360,7 @@ class Push(Command):
             if self.policy is not None:
                 def step(action, ik_attempts=None):
                     if action is None:
-                        state =  condition_state(get_state_wrt_world(self.robot, self.body), goal['obj_pos'])
+                        state =  condition_state(get_state_wrt_base(self.robot, self.body), goal)
                         return state, -1, True
                     sim_time = 0.0
                     # roll out action in the environment
@@ -369,12 +369,11 @@ class Push(Command):
                         sim_time += sim_dt
                         if sim_time > 1/CONTROL_FREQ:
                             break
-                    state = get_state_wrt_world(self.robot, self.body)
-                    state = condition_state(state, goal['obj_pos'])
-                    dist = np.linalg.norm(state['obj_pose'][:-1] - state['goal'])
-                    # rel_dist = np.linalg.norm(state['rel_pos'][:2]) # KLUDGE: reward bias
+                    state = get_state_wrt_base(self.robot, self.body)
+                    state = condition_state(state, goal)
+                    dist = np.linalg.norm(state['obj_pose'][:2] - state['goal'])
                     done = dist < BLOCK_WIDTH
-                    reward = int(done) # - dist #- rel_dist
+                    reward = int(done)
                     if ik_attempts is not None:
                         reward -= ik_attempts / 100 # penalize IK attempts
                     return state, reward, done
@@ -385,10 +384,10 @@ class Push(Command):
                     next_states = []
                     rewards = []
                     dones = []
-                    state = flatten_state(condition_state(get_state_wrt_world(self.robot, self.body), goal['obj_pos'])) # get_state
+                    state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
                     if self.stats is not None:
                         state = normalize_state(state, self.stats)
-                    old_gripper_pose = get_tool_pose(self.robot)
+                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
                     old_gripper_state = get_gripper_state(old_gripper_pose) #
                     gripper_height = old_gripper_pose[0][-1]
                     gripper_orn = euler_from_quat(old_gripper_pose[-1])
@@ -397,11 +396,13 @@ class Push(Command):
                         action = model.actor.act(state, device="cpu")
                         unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
                         gripper_state = list(map(add, unnormed_action, old_gripper_state)) # x,y,rot
+                        yaw = np.arctan2(gripper_state[-2], gripper_state[-1])
                         new_gripper_pose = Posee(
-                            Point(gripper_state[0], gripper_state[1], gripper_height), #,gripper_pose[0][-1]
-                            Euler(gripper_orn[0], gripper_orn[1], gripper_state[-1]) # gripper_orn
+                            Point(gripper_state[0], gripper_state[1], gripper_height),
+                            Euler(gripper_orn[0], gripper_orn[1], yaw)
                         )
-                        desired_joint_state = sample_tool_ik(self.robot, new_gripper_pose, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
+                        gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
+                        desired_joint_state = sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
                         if desired_joint_state is None:
                             print("IK failed: ", i)
                             wait_if_gui()
@@ -412,7 +413,7 @@ class Push(Command):
                             next_state = normalize_state(next_state, self.stats)
                     
                         # action info
-                        old_gripper_state = get_gripper_state(get_tool_pose(self.robot)) #
+                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
 
                         # save
                         states.append(state)
@@ -431,10 +432,10 @@ class Push(Command):
                     return eval, states, actions, next_states, rewards, dones
 
                 def rollout_corl(model, buffer):
-                    state = flatten_state(condition_state(get_state_wrt_world(self.robot, self.body), goal['obj_pos'])) # get_state
+                    state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
                     if self.stats is not None:
                         state = normalize_state(state, self.stats)
-                    old_gripper_pose = get_tool_pose(self.robot)
+                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
                     gripper_height = old_gripper_pose[0][-1]
                     gripper_orn = old_gripper_pose[-1]
                     old_gripper_state = get_gripper_state(old_gripper_pose)
@@ -458,21 +459,21 @@ class Push(Command):
                             action = action.cpu().data.numpy().flatten()
                             unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
                             gripper_state = list(map(add, unnormed_action, old_gripper_state)) # x,y,rot
+                            yaw = np.arctan2(gripper_state[-2], gripper_state[-1])
                             new_gripper_pose = Posee(
-                                Point(gripper_state[0], gripper_state[1], gripper_height), #,gripper_pose[0][-1]
-                                Euler(gripper_orn[0], gripper_orn[1], gripper_state[-1]) # gripper_orn
+                                Point(gripper_state[0], gripper_state[1], gripper_height),
+                                Euler(gripper_orn[0], gripper_orn[1], yaw)
                             )
-                            desired_joint_state = sample_tool_ik(self.robot, new_gripper_pose, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
+                            gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
+                            desired_joint_state = sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
                             k = j
                             if desired_joint_state is not None:
                                 break
 
                         next_state, reward, done = step(desired_joint_state, k)
 
-                        old_gripper_state = get_gripper_state(get_tool_pose(self.robot))
+                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
                         
-                        deviation = np.linalg.norm(next_state['tool_pose'][:-1] - next_state['obj_pose'][:-1])
-
                         # add transition to batch so that policy can react from current episode
                         next_state = flatten_state(next_state)
                         if self.stats is not None:
@@ -491,10 +492,6 @@ class Push(Command):
                         log_dict = model.train(buffer)
                         logs.append([log_dict, model.total_it])
 
-                        # end if EE is too far from object (bad data)
-                        if deviation > MAX_DEVIATION:
-                            print('too much deviation!')
-                            break
 
                         # if done or success, end before horizon is reached
                         if done:
@@ -542,18 +539,20 @@ class Push(Command):
                 gripper_deltas = []
                 obj_poses = []
                 action_infos = []
-                init_pose = get_pose(self.body) # world frame
+                init_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
                 sim_time = 0.0
-                state = get_state_wrt_world(self.robot, self.body)
-                old_gripper_state = get_gripper_state(get_tool_pose(self.robot))
-                wait_if_gui()
+                state = get_state_wrt_base(self.robot, self.body)
+                old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
+                print("gripper state: ", old_gripper_state)
                 steps = 0
+                wait_if_gui()
                 # demo replay
                 if self.demo_path is not None:
                     wait_if_gui()
                     dataset = np.load(self.demo_path, allow_pickle=True)
                     actions = dataset[0]["actions"]
-                    old_gripper_pose = get_tool_pose(self.robot)
+                    states = dataset[0]["states"]
+                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
                     gripper_height = old_gripper_pose[0][-1]
                     gripper_orn = euler_from_quat(old_gripper_pose[-1])
                     for action in actions:
@@ -563,7 +562,8 @@ class Push(Command):
                             Point(gripper_state[0], gripper_state[1], gripper_height), #,gripper_pose[0][-1]
                             Euler(gripper_orn[0], gripper_orn[1], gripper_state[-1]) # gripper_orn
                         )
-                        desired_joint_state = sample_tool_ik(self.robot, new_gripper_pose, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
+                        gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
+                        desired_joint_state = sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
                         if desired_joint_state is None:
                             print("IK failed.")
                             wait_if_gui()
@@ -575,7 +575,7 @@ class Push(Command):
                                 sim_time = 0.0
                                 steps += 1
                                 break # controller is reset every control loop
-                        old_gripper_state = get_gripper_state(get_tool_pose(self.robot))
+                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
                     wait_if_gui()
                 for conf in self.trajectory.path: # scripted skill
                     if steps >= horizon:
@@ -589,8 +589,8 @@ class Push(Command):
                             sim_time = 0.0
                             steps += 1
                             break # controller is reset every control loop
-                    gripper_state = get_gripper_state(get_tool_pose(self.robot))
-                    obj_pose = get_pose(self.body)
+                    gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
+                    obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
                     gripper_delta = list(map(sub, gripper_state, old_gripper_state))
                     normed_gripper_delta = list(map(truediv, gripper_delta, GRIPPER_NORM_COST))
                     gripper_deltas.append(normed_gripper_delta) #
@@ -599,8 +599,8 @@ class Push(Command):
                     info = {}
                     info["actions"] = np.array(normed_gripper_delta)
                     action_infos.append(info)
-                    state = get_state_wrt_world(self.robot, self.body)
-                    dist = np.linalg.norm(state['obj_pose'][:-1] - goal['obj_pos'])
+                    state = get_state_wrt_base(self.robot, self.body)
+                    dist = np.linalg.norm(state['obj_pose'][:2] - goal)
                     # rel_dist = np.linalg.norm(state['rel_pos'][:2]) # KLUDGE: reward bias
                     done = dist < BLOCK_WIDTH
                     reward = int(done) # - dist #- rel_dist #
@@ -617,6 +617,9 @@ class Push(Command):
                 eval = is_point_in_plate(get_pose(self.body)[0])
                 print('success: ', eval)
                 results['scripted'] = eval
+
+                if self.evaluate:
+                    return {'success': eval}
 
                 # also save initial pose and orientation
                 results['x'] = init_pose[0][0]
@@ -1410,14 +1413,13 @@ def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
             wait_if_gui()
 
 # samples base pose from learned value function
-def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_function, reach_dir, grid_search, max_attempts=25):
+def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_function, reach_dir, grid_search, max_attempts=25):
     while True:
         x = (-1.2, 1.2)
         y = x
         theta = (-math.pi, math.pi)
         block_reachable_range = (0.48, 0.99)
         gripper_reachable_range = (0.45, 0.85)
-        phi = (-math.pi, math.pi)
         if reach_dir is not None: # for reachability test
             # compare with uniform
             base_values = sample_reachable_base(robot, point_from_pose(gripper_pose), reachable_range=gripper_reachable_range)
@@ -1428,7 +1430,7 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
                 print("Making new directory at {}".format(reach_dir))
                 os.makedirs(reach_dir)
             results['uniform'] = int(goal_is_reachable)
-        def get_feasibility_estimate(params, robot, value_function, start_pose, gripper_pose, goal_pose, grid=False):
+        def get_feasibility_estimate(params, robot, value_function, start_body, gripper_pose, goal_pose, grid=False):
             if grid:
                 base_values = params
             else:
@@ -1438,9 +1440,9 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
             # set the base conf
             bq = Conf(robot, get_group_joints(robot, 'base'), base_values)
             bq.assign()
-            state = get_state_wrt_world(robot, start_pose)
-            state["tool_pose"] = pose2d_from_pose(gripper_pose) # set tool_pose to gripper_pose
-            state = flatten_state(condition_state(state, point_from_pose(goal_pose)[:-1]))
+            state = get_state_wrt_base(robot, start_body)
+            state["tool_pose"] = pose2d_from_pose(get_pose_wrt_base(robot, gripper_pose)) # set tool_pose to gripper_pose
+            state = flatten_state(condition_state(state, get_goal_wrt_base(robot, goal_pose)))
             # w/o uncertainty
             return value_function(
                 torch.tensor(
@@ -1462,7 +1464,7 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
                 for j, param2 in enumerate(param2_range):
                     for k, param3 in enumerate(param3_range):
                         params = (param1, param2, param3)
-                        metric = get_feasibility_estimate(params, robot, value_function, start_pose, gripper_pose, goal_pose, grid=True)
+                        metric = get_feasibility_estimate(params, robot, value_function, start_body, gripper_pose, goal_pose, grid=True)
                         grid_data[i, j, k] = metric
             end = time.time()
             print('execution time (s): ', end-start)
@@ -1470,10 +1472,11 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
             sorted_indices = sort_3d_array_indices_desc(grid_data)
             indices = sorted_indices.pop(0)
             best_params = (param1_range[indices[0]], param2_range[indices[1]], param3_range[indices[2]])
+            best_params = maybe_flip_phi(best_params, start_body)
             best_metric = grid_data[indices]
             # check that the base is in the reachable zone
             print('grid search: ')
-            init_is_reachable = is_reachable(best_params, get_pose(start_pose), gripper_reachable_range)
+            init_is_reachable = is_reachable(best_params, get_pose(start_body), gripper_reachable_range)
             print('initial block pose reachability: ', init_is_reachable)
             goal_is_reachable = is_reachable(best_params, goal_pose, block_reachable_range)
             print('goal block pose reachability: ', goal_is_reachable)
@@ -1496,7 +1499,7 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
                 objective, 
                 robot=robot,
                 value_function=value_function,
-                start_pose=start_pose,
+                start_pose=start_body,
                 gripper_pose=gripper_pose,
                 goal_pose=goal_pose
             )
@@ -1510,16 +1513,17 @@ def learned_pose_generator(robot, start_pose, gripper_pose, goal_pose, value_fun
             (radius, theta, phi) = result.x # convert back to world pose
             x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2]
             learned_base_values = (x, y, phi)
-            learned_base_values = maybe_flip_phi(learned_base_values, start_pose)
+            learned_base_values = maybe_flip_phi(learned_base_values, start_body)
             print('Best parameters:', learned_base_values)
             # check that the base is in the reachable zone
-            init_is_reachable = is_reachable(learned_base_values, get_pose(start_pose), block_reachable_range)
+            init_is_reachable = is_reachable(learned_base_values, get_pose(start_body), gripper_reachable_range)
             print('initial block pose reachability: ', init_is_reachable)
-            goal_is_reachable = is_reachable(learned_base_values, goal_pose, block_reachable_range, epsilon=0.05)
+            goal_is_reachable = is_reachable(learned_base_values, goal_pose, block_reachable_range, epsilon=0.07)
             print('goal block pose reachability: ', goal_is_reachable)
             wait_if_gui()
                 
         if reach_dir is not None: # for reachability test
+            results['policy'] = int(goal_is_reachable)
             t1, t2 = str(time.time()).split(".")
             col_path = os.path.join(reach_dir, "reachable_{}_{}.npz".format(t1, t2))
             np.savez(
