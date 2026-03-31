@@ -13,28 +13,27 @@ import numpy as np
 import torch
 
 from .ikfast.utils import USE_CURRENT
-from .ikfast.tiago.ik import get_base, get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, get_tool_vel, \
+from .ikfast.tiago.ik import get_base, get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, \
     is_ik_compiled, tiago_inverse_kinematics, sample_tool_ik
-from .pr2_primitives import State, Trajectory, create_trajectory
-from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, TOOL_POSE, \
-    TOP_HOLDING_LEFT_ARM, align_gripper, compute_grasp_width, get_align, get_arm_conf, \
-    get_arm_joints, get_carry_conf, get_gripper_joints, get_gripper_link, get_gripper_state, get_group_conf, \
-    get_group_joints, get_midpoint_pose, get_top_grasps, is_reachable, maybe_flip_phi, open_gripper, perturb_base, pose2d_from_pose, \
-    show_heatmap, sort_3d_array_indices_desc
-from .utils import UNIT_LIMITS, Attachment, BodySaver, Euler, Point, Pose2d, WorldSaver, \
-    connect, custom_pose_generator, euler_from_quat, add_fixed_constraint, all_between, \
-    approximate_as_prism, base_values_from_pose, create_attachment, disable_real_time, \
-    enable_gravity, enable_real_time, flatten_links, get_base_values, get_body_name, get_bounding_box, get_closest_points, \
-    get_collision_data, get_configuration, get_custom_limits, get_distance, get_extend_fn, \
-    get_joint_limits, get_joint_position, get_joint_positions, get_link_pose, get_min_limit, \
-    get_moving_links, get_name, get_pose, get_pose_distance, get_relative_pose, get_static_image, \
-    get_time_step, get_unit_vector, get_velocity, interpolate_poses, inverse_kinematics, inverse_kinematics_helper, invert, \
-    is_placement, is_point_in_polygon, is_pose_close, joint_controller_hold, joints_from_names, \
-    link_from_name, multiply, pairwise_collision, plan_base_motion, plan_direct_joint_motion, \
-    plan_joint_motion, point_from_pose, pose_from_base_values, pose_from_pose2d, quat_from_euler, \
-    remove_fixed_constraint, sample_placement, sample_reachable_base, sample_reachable_base2, set_base_values, set_figure, \
-    set_pose, show_image, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_from_theta, \
-    unit_pose, unit_quat, wait_for_duration, wait_if_gui, wrap_angle, z_rotation, set_joint_positions
+from .tiago_utils import TIAGO_GRIPPER_ROOT, TIAGO_GROUPS, TIAGO_TOOL_FRAME, \
+    align_gripper, close_gripper, compute_grasp_width, get_align, \
+    get_arm_joints, get_carry_conf, get_gripper_consts, get_gripper_joints, get_gripper_link, get_group_conf, \
+    get_group_joints, get_top_grasps, is_reachable, maybe_flip_phi, open_gripper, perturb_base, \
+    show_heatmap, sort_3d_array_indices_desc, pose2d_from_pose, get_gripper_state
+from .utils import BASE_LINK, UNIT_LIMITS, Attachment, BodySaver, Euler, Point, WorldSaver, add_segments, \
+    custom_pose_generator, euler_from_quat, add_fixed_constraint, all_between, \
+    base_values_from_pose, create_attachment, disable_real_time, \
+    enable_gravity, flatten_links, get_aabb, get_bodies, get_body_name, get_bounding_box, \
+    get_configuration, get_custom_limits, get_distance, get_extend_fn, \
+    get_joint_limits, get_joint_position, get_joint_positions, get_link_pose, get_link_subtree, get_min_limit, \
+    get_moving_links, get_name, get_pose, get_relative_pose, get_static_image, \
+    get_time_step, get_unit_vector, has_gui, interpolate_poses, invert, \
+    is_placement, joint_controller_hold, joints_from_names, \
+    link_from_name, multiply, pairwise_collision, plan_direct_joint_motion, \
+    plan_joint_motion, point_from_pose, point_in_annulus, remove_debug, \
+    remove_fixed_constraint, sample_placement, sample_reachable_base, sample_reachable_base2, \
+    set_pose, step_simulation, sub_inverse_kinematics, uniform_pose_generator, unit_from_theta, \
+    unit_quat, wait_for_duration, wait_if_gui, set_joint_positions, waypoints_from_path
 from .utils import Pose as Posee
 BASE_EXTENT = 3.5 # 2.5
 BASE_LIMITS = (-BASE_EXTENT*np.ones(2), BASE_EXTENT*np.ones(2))
@@ -44,20 +43,33 @@ SELF_COLLISIONS = False
 CONTROL_FREQ = 20.0 # Hz
 MAX_HORIZON = 50
 EVAL_HORIZON = 100
-SUCCESS_DISTANCE = 0.05 # m
 PLATE_VERTICES = [[-0.135, -0.135],[0.135,-0.135],[0.135,0.135],[-0.135,0.135]]
-BLOCK_WIDTH = 0.07
+PLATE_RADIUS = 0.07
 HOOK_WIDTH = 0.1
 HOOK_LENGTH = 0.2
 MAX_JOINT_VELOCITIES = np.array([1.95, 1.95, 2.35, 2.35, 1.95, 1.95, 1.76]) # in rad/s
 ACTION_NORM_CONST = (MAX_JOINT_VELOCITIES / CONTROL_FREQ).tolist()
-GRIPPER_NORM_COST = [0.02, 0.02, 0.05, 0.05]
+GRIPPER_NORM_COST = [0.05, 0.05, 0.05, 0.05] # [m, m, rad, rad]/step
+BLOCK_REACHABLE_RANGE = (0.48, 0.99)
+GRIPPER_REACHABLE_RANGE = (0.45, 0.85) #85 | 70
+
+##################################################
+
+class State(object):
+    def __init__(self, attachments={}, cleaned=set(), cooked=set()):
+        self.poses = {body: Pose(body, get_pose(body))
+                      for body in get_bodies() if body not in attachments}
+        self.grasps = {}
+        self.attachments = attachments
+        self.cleaned = cleaned
+        self.cooked = cooked
+    def assign(self):
+        for attachment in self.attachments.values():
+            #attach.attachment.assign()
+            attachment.assign()
 
 class Pose(object):
     num = count()
-    #def __init__(self, position, orientation):
-    #    self.position = position
-    #    self.orientation = orientation
     def __init__(self, body, value=None, support=None, init=False):
         self.body = body
         if value is None:
@@ -80,6 +92,38 @@ class Pose(object):
         index = self.index
         #index = id(self) % 1000
         return 'p{}'.format(index)
+
+# like attachment but doesn't set the object pose
+class Adjunct(object):
+    def __init__(self, parent, parent_link, grasp_pose, child):
+        self.parent = parent # TODO: support no parent
+        self.parent_link = parent_link
+        self.grasp_pose = grasp_pose
+        self.child = child
+    @property
+    def bodies(self):
+        return flatten_links(self.child) | flatten_links(self.parent, get_link_subtree(
+            self.parent, self.parent_link))
+    def assign(self):
+        return get_pose(self.child)
+    def apply_mapping(self, mapping):
+        self.parent = mapping.get(self.parent, self.parent)
+        self.child = mapping.get(self.child, self.child)
+    def __repr__(self):
+        return '{}({},{})'.format(self.__class__.__name__, self.parent, self.child)
+
+class Alignment(object):
+    def __init__(self, grasp_type, body, value, approach, carry):
+        self.grasp_type = grasp_type
+        self.body = body
+        self.value = tuple(value) # gripper_from_object
+        self.approach = tuple(approach)
+        self.carry = tuple(carry)
+    def get_attachment(self, robot):
+        tool_link = link_from_name(robot, TIAGO_TOOL_FRAME)
+        return Adjunct(robot, tool_link, self.value, self.body)
+    def __repr__(self):
+        return 'g{}'.format(id(self) % 1000)
 
 class Grasp(object):
     def __init__(self, grasp_type, body, value, approach, carry):
@@ -212,6 +256,79 @@ class Detach(Command):
     def __repr__(self):
         return '{}({},{})'.format(self.__class__.__name__, get_body_name(self.robot), get_name(self.body))
     
+class Trajectory(Command):
+    _draw = False
+    def __init__(self, path):
+        self.path = tuple(path)
+        # TODO: constructor that takes in this info
+    def apply(self, state, sample=1):
+        handles = add_segments(self.to_points()) if self._draw and has_gui() else []
+        for conf in self.path[::sample]:
+            conf.assign()
+            yield
+        end_conf = self.path[-1]
+        if isinstance(end_conf, Pose):
+            state.poses[end_conf.body] = end_conf
+        for handle in handles:
+            remove_debug(handle)
+    def control(self, dt=0, **kwargs):
+        # TODO: just waypoints
+        for conf in self.path:
+            if isinstance(conf, Pose):
+                conf = conf.to_base_conf()
+            for _ in joint_controller_hold(conf.body, conf.joints, conf.values):
+                step_simulation()
+                time.sleep(dt)
+    def to_points(self, link=BASE_LINK):
+        # TODO: this is computationally expensive
+        points = []
+        for conf in self.path:
+            with BodySaver(conf.body):
+                conf.assign()
+                #point = np.array(point_from_pose(get_link_pose(conf.body, link)))
+                point = np.array(get_group_conf(conf.body, 'base'))
+                point[2] = 0
+                point += 1e-2*np.array([0, 0, 1])
+                if not (points and np.allclose(points[-1], point, atol=1e-3, rtol=0)):
+                    points.append(point)
+        points = get_target_path(self)
+        return waypoints_from_path(points)
+    def distance(self, distance_fn=get_distance):
+        total = 0.
+        for q1, q2 in zip(self.path, self.path[1:]):
+            total += distance_fn(q1.values, q2.values)
+        return total
+    def iterate(self):
+        for conf in self.path:
+            yield conf
+    def reverse(self):
+        return Trajectory(reversed(self.path))
+    def __repr__(self):
+        d = 0
+        if self.path:
+            conf = self.path[0]
+            d = 3 if isinstance(conf, Pose) else len(conf.joints)
+        return 't({},{})'.format(d, len(self.path))
+    
+def create_trajectory(robot, joints, path):
+    return Trajectory(Conf(robot, joints, q) for q in path)
+
+def get_target_path(trajectory):
+    return [get_target_point(conf) for conf in trajectory.path]
+
+def get_target_point(conf):
+    robot = conf.body
+    link = link_from_name(robot, 'torso_lift_link')
+    with BodySaver(conf.body):
+        conf.assign()
+        lower, upper = get_aabb(robot, link)
+        center = np.average([lower, upper], axis=0)
+        point = np.array(get_group_conf(conf.body, 'base'))
+        point[2] = center[2]
+        return point
+
+##################################################
+
 #TODO: move to utils
 def normalize_joint(joint, lower, upper):
     tmp = (joint - lower) / (upper - lower)
@@ -243,27 +360,7 @@ def get_unnormalized_arm_joint_positions(body, positions):
 
 #TODO: move to utils
 def is_point_in_plate(point):
-    return int(is_point_in_polygon(point, PLATE_VERTICES))
-
-def get_state(robot, body):
-    tool_pos, tool_orn = get_tool_pose_wrt_base(robot) # wrt base frame
-    tool_orn = euler_from_quat(tool_orn)
-    world_from_obj = get_pose(body)
-    obj_pos, obj_orn = get_pose_wrt_base(robot, world_from_obj) # wrt base frame
-    obj_orn = euler_from_quat(obj_orn)
-    obj_vel_lin, obj_vel_ang = get_velocity(body)
-    obj_vel_lin, _ = get_pose_wrt_base(robot, (obj_vel_lin, (0,0,0,1))) # wrt base frame
-    tool_vel_lin, _ = get_tool_vel(robot) # end-effector angular velocity is 0
-    tool_vel_lin, _ = get_pose_wrt_base(robot, (tool_vel_lin, (0,0,0,1))) # wrt base frame
-    rel_vel = tuple(map(lambda x, y: x-y, obj_vel_lin, tool_vel_lin))
-    rel_pos = tuple(map(lambda x, y: x-y, obj_pos, tool_pos))
-    ret = {}
-    ret["tool_pos"] = np.array(tool_pos) # 3
-    ret["tool_orn"] = np.array(tool_orn) # 3
-    ret["obj_pos"] = np.array(obj_pos) # 3
-    ret["obj_orn"] = np.array(obj_orn) # 3
-    ret["rel_pos"] = np.array(rel_pos) # 3
-    return ret
+    return int(np.linalg.norm(point[:2]) < PLATE_RADIUS)
 
 def get_state_wrt_base(robot, body):
     tool_pose = pose2d_from_pose(get_tool_pose_wrt_base(robot))
@@ -300,9 +397,7 @@ def condition_state(state, goal):
     return state
 
 def normalize_state(state, stats):
-        return (
-            state - stats[0]
-        ) / stats[1]
+    return np.clip(state, stats[0], stats[1])
 
 def get_goal(robot, pose):
     goal_pos, _ = get_pose_wrt_base(robot, pose) # wrt base frame
@@ -311,7 +406,7 @@ def get_goal(robot, pose):
     return {"obj_pos" : goal_pos}
 
 class Push(Command):
-    def __init__(self, robot, body, pose, trajectory, directory=None, policy=None, evaluate=False, collect_dir=None, bootstrap=False, ablation=False, buffer=None, stats=None, demo_path=None):
+    def __init__(self, robot, body, pose, trajectory, directory=None, policy=None, evaluate=False, collect_dir=None, bootstrap=False, ablation=False, buffer=None, stats=None, demo_path=None, dense=False, jammed=False):
         self.robot = robot
         self.body = body
         self.pose = pose
@@ -325,6 +420,8 @@ class Push(Command):
         self.ablation = ablation
         self.stats = stats
         self.demo_path = demo_path
+        self.dense = dense
+        self.jammed = jammed
     def apply(self, state, **kwargs):
         self.trajectory.apply(state, **kwargs)
     def control(self, **kwargs):
@@ -337,7 +434,11 @@ class Push(Command):
             goal = get_goal_wrt_base(self.robot, self.pose.value)
             horizon = EVAL_HORIZON if self.evaluate and self.directory is None else MAX_HORIZON
             joints = get_arm_joints(self.robot)
-            if self.collect_dir is not None: # collect initial config and save in a csv
+            state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
+            if self.stats is not None:
+                state = normalize_state(state, self.stats)
+            init_state = state
+            if self.collect_dir: # collect initial config and save in a csv
                 torso_state = get_group_conf(self.robot, 'torso')
                 arm_state = get_group_conf(self.robot, 'arm')
                 gripper_state = get_group_conf(self.robot, 'gripper')
@@ -358,128 +459,106 @@ class Push(Command):
                 break
 
             if self.policy is not None:
-                def step(action, ik_attempts=None):
-                    if action is None:
+                def convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state):
+                    (roll, pitch, z) = gripper_consts
+                    unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
+                    (x, y, sin_yaw, cos_yaw) = list(map(add, unnormed_action, old_gripper_state)) # x,y,rot
+                    yaw = np.arctan2(sin_yaw, cos_yaw)
+                    new_gripper_pose = Posee(
+                        Point(x, y, z),
+                        Euler(roll, pitch, yaw)
+                    )
+                    gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
+                    return sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
+
+                def step(desired_joint_state, old_joint_value):
+                    if desired_joint_state is None:
                         state =  condition_state(get_state_wrt_base(self.robot, self.body), goal)
-                        return state, -1, True
+                        return state, -1, True, 0.
+                    # stuck = False
+                    if self.jammed:
+                        if desired_joint_state[0] < old_joint_value and old_joint_value > np.pi/2: # only left pushes
+                            # stuck = True
+                            desired_joint_state[0] = old_joint_value
+                    old_joint_value = desired_joint_state[0]
                     sim_time = 0.0
-                    # roll out action in the environment
-                    for i, _ in enumerate(joint_controller_hold(self.robot, joints, action)):
+                    for _ in joint_controller_hold(self.robot, joints, desired_joint_state):
                         step_simulation()
                         sim_time += sim_dt
                         if sim_time > 1/CONTROL_FREQ:
                             break
                     state = get_state_wrt_base(self.robot, self.body)
                     state = condition_state(state, goal)
-                    dist = np.linalg.norm(state['obj_pose'][:2] - state['goal'])
-                    done = dist < BLOCK_WIDTH
-                    reward = int(done)
-                    if ik_attempts is not None:
-                        reward -= ik_attempts / 100 # penalize IK attempts
-                    return state, reward, done
+                    dist = np.linalg.norm(state['obj_pose'][:2] - state['goal']) # tool_pose for reach
+                    done = dist < PLATE_RADIUS
+                    if self.dense:
+                        reward = - dist
+                    elif done:
+                        reward = 0
+                    # elif stuck:
+                    #     reward = -2
+                    else:
+                        reward = -1
+                    return state, reward, done, old_joint_value
 
-                def evaluate_corl(model):
-                    states = []
-                    actions = []
-                    next_states = []
-                    rewards = []
-                    dones = []
-                    state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
-                    if self.stats is not None:
-                        state = normalize_state(state, self.stats)
-                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
-                    old_gripper_state = get_gripper_state(old_gripper_pose) #
-                    gripper_height = old_gripper_pose[0][-1]
-                    gripper_orn = euler_from_quat(old_gripper_pose[-1])
-                    model.actor.eval()
-                    for i in range(horizon):
-                        action = model.actor.act(state, device="cpu")
-                        unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
-                        gripper_state = list(map(add, unnormed_action, old_gripper_state)) # x,y,rot
-                        yaw = np.arctan2(gripper_state[-2], gripper_state[-1])
-                        new_gripper_pose = Posee(
-                            Point(gripper_state[0], gripper_state[1], gripper_height),
-                            Euler(gripper_orn[0], gripper_orn[1], yaw)
-                        )
-                        gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
-                        desired_joint_state = sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
-                        if desired_joint_state is None:
-                            print("IK failed: ", i)
-                            wait_if_gui()
-                            break
-                        next_state, reward, done = step(desired_joint_state)
-                        next_state = flatten_state(next_state)
-                        if self.stats is not None:
-                            next_state = normalize_state(next_state, self.stats)
-                    
-                        # action info
-                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
-
-                        # save
-                        states.append(state)
-                        actions.append(action) #TODO
-                        next_states.append(next_state)
-                        rewards.append(reward)
-                        dones.append(done)
-                        state = next_state
-
-                        # if done or success, end before horizon is reached
-                        if is_point_in_plate(get_pose(self.body)[0]): # done
-                            wait_if_gui()
-                            break
-                    model.actor.train()
-                    eval = is_point_in_plate(get_pose(self.body)[0])
-                    return eval, states, actions, next_states, rewards, dones
-
-                def rollout_corl(model, buffer):
-                    state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
-                    if self.stats is not None:
-                        state = normalize_state(state, self.stats)
-                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
-                    gripper_height = old_gripper_pose[0][-1]
-                    gripper_orn = old_gripper_pose[-1]
-                    old_gripper_state = get_gripper_state(old_gripper_pose)
-                    max_action = float(1)
+                def rollout_corl(model, buffer=None):
                     logs = []
                     states = []
                     actions = []
-                    rewards = []
                     next_states = []
+                    rewards = []
                     dones = []
+                    state = flatten_state(condition_state(get_state_wrt_base(self.robot, self.body), goal))
+                    if self.stats is not None:
+                        state = normalize_state(state, self.stats)
+                    old_gripper_pose = get_tool_pose_wrt_base(self.robot)
+                    old_gripper_state = get_gripper_state(old_gripper_pose)
+                    gripper_consts = get_gripper_consts(old_gripper_pose)
+                    block_y = state[5]
+                    gripper_y = old_gripper_pose[0][1]
+                    jammed_init = gripper_y > 0 and gripper_y > block_y # if y-axis is negative, jammed
+                    jammed_init = jammed_init and self.jammed
+                    if jammed_init:
+                        print('arm is jammed.')
+                    max_action = float(1)
+                    old_joint_value = get_joint_positions(self.robot, joints)[0]
+
+                    if self.evaluate:
+                        model.actor.eval()
                     for i in range(horizon):
-                        actor = model.actor(
-                            torch.tensor(
-                                state.reshape(1, -1), device="cpu", dtype=torch.float32
+                        if self.evaluate:
+                            action = model.actor.act(state, device="cpu")
+                            desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
+                            for _ in range(100): # if IK fails, revert to sample
+                                if desired_joint_state is None:
+                                    action = model.actor.act(state, device="cpu", fallback=True)
+                                    desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
+                                else:
+                                    break
+                        else:
+                            actor = model.actor(
+                                torch.tensor(
+                                    state.reshape(1, -1), device="cpu", dtype=torch.float32
+                                )
                             )
-                        )
-                        k = 0
-                        for j in range(100):
-                            action = actor.sample()
-                            action = torch.clamp(max_action * action, -max_action, max_action)
-                            action = action.cpu().data.numpy().flatten()
-                            unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
-                            gripper_state = list(map(add, unnormed_action, old_gripper_state)) # x,y,rot
-                            yaw = np.arctan2(gripper_state[-2], gripper_state[-1])
-                            new_gripper_pose = Posee(
-                                Point(gripper_state[0], gripper_state[1], gripper_height),
-                                Euler(gripper_orn[0], gripper_orn[1], yaw)
-                            )
-                            gripper_pose_wrt_world = multiply(get_base(self.robot), new_gripper_pose)
-                            desired_joint_state = sample_tool_ik(self.robot, gripper_pose_wrt_world, max_attempts=100, torso_limits=USE_CURRENT) # upper_limits
-                            k = j
-                            if desired_joint_state is not None:
-                                break
+                            for _ in range(100): # try IK many times
+                                action = actor.sample()
+                                action = torch.clamp(max_action * action, -max_action, max_action)
+                                action = action.cpu().data.numpy().flatten()
+                                desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
+                                if desired_joint_state is not None:
+                                    break
 
-                        next_state, reward, done = step(desired_joint_state, k)
-
-                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
+                        next_state, reward, done, old_joint_value = step(desired_joint_state, old_joint_value)
                         
-                        # add transition to batch so that policy can react from current episode
                         next_state = flatten_state(next_state)
                         if self.stats is not None:
                             next_state = normalize_state(next_state, self.stats)
-                        if buffer.__class__.__name__ in ("ReplayBuffer", "PrioritizedReplayBuffer"):
-                            buffer.add_transition(state, action, reward, next_state, done) # normed_action_delta
+
+                        if buffer is not None and buffer.__class__.__name__ in ("ReplayBuffer", "PrioritizedReplayBuffer"):
+                            buffer.add_transition(state, action, reward, next_state, done)
+                        
+                        old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
                         
                         states.append(state)
                         actions.append(action)
@@ -489,9 +568,9 @@ class Push(Command):
 
                         state = next_state
 
-                        log_dict = model.train(buffer)
-                        logs.append([log_dict, model.total_it])
-
+                        if not self.evaluate:
+                            log_dict = model.train(buffer)
+                            logs.append([log_dict, model.total_it])
 
                         # if done or success, end before horizon is reached
                         if done:
@@ -499,13 +578,13 @@ class Push(Command):
                                 print("IK failed: ", i)
                                 wait_if_gui()
                             break
-                    
-                    print('Using learned policy')
-                    eval = is_point_in_plate(get_pose(self.body)[0])
-                    print('success: ', eval)
+                    wait_if_gui()
+                    if self.evaluate:
+                        model.actor.train()
+                    success = is_point_in_plate(get_pose(self.body)[0]) # get_tool_pose(self.robot)[0] for reach
 
                     # per-episode buffer
-                    if buffer.__class__.__name__ == "HindsightReplayBuffer":
+                    if buffer is not None and buffer.__class__.__name__ == "HindsightReplayBuffer":
                         # prepare batch for HER buffer
                         padded_states = pad_list_to_length(states, MAX_HORIZON, next_states[-1])
                         padded_next_states = pad_list_to_length(next_states, MAX_HORIZON)
@@ -522,28 +601,23 @@ class Push(Command):
                         }
                         buffer.store_episode(list_to_numpy(trajectory))
 
-                    return logs
-
+                    return success, jammed_init, logs
+                
                 wait_if_gui()
-                if self.evaluate:
-                    eval, states, actions, next_states, rewards, dones = evaluate_corl(self.policy)
-                    print('Eval success:', eval)
-                else:
-                    log_dict = rollout_corl(self.policy, self.buffer)
+                success, jammed_init, log_dict = rollout_corl(self.policy, self.buffer)
+                print('success:', success)
 
             if not self.bootstrap:
                 states = []
                 next_states = []
                 rewards = []
                 dones = []
-                gripper_deltas = []
                 obj_poses = []
                 action_infos = []
                 init_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
                 sim_time = 0.0
                 state = get_state_wrt_base(self.robot, self.body)
                 old_gripper_state = get_gripper_state(get_tool_pose_wrt_base(self.robot))
-                print("gripper state: ", old_gripper_state)
                 steps = 0
                 wait_if_gui()
                 # demo replay
@@ -593,17 +667,13 @@ class Push(Command):
                     obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
                     gripper_delta = list(map(sub, gripper_state, old_gripper_state))
                     normed_gripper_delta = list(map(truediv, gripper_delta, GRIPPER_NORM_COST))
-                    gripper_deltas.append(normed_gripper_delta) #
                     old_gripper_state = gripper_state
                     obj_poses.append(obj_pose)
-                    info = {}
-                    info["actions"] = np.array(normed_gripper_delta)
-                    action_infos.append(info)
+                    action_infos.append({"actions": np.array(normed_gripper_delta)})
                     state = get_state_wrt_base(self.robot, self.body)
                     dist = np.linalg.norm(state['obj_pose'][:2] - goal)
-                    # rel_dist = np.linalg.norm(state['rel_pos'][:2]) # KLUDGE: reward bias
-                    done = dist < BLOCK_WIDTH
-                    reward = int(done) # - dist #- rel_dist #
+                    done = dist < PLATE_RADIUS
+                    reward = - dist if self.dense else int(done) - 1
                     rewards.append(reward)
                     dones.append(done)
                     next_states.append(state)
@@ -614,12 +684,12 @@ class Push(Command):
 
                 # evaluate TAMP trajectory
                 print('using motion planner script.')
-                eval = is_point_in_plate(get_pose(self.body)[0])
-                print('success: ', eval)
-                results['scripted'] = eval
+                success = is_point_in_plate(get_pose(self.body)[0])
+                print('success: ', success)
+                results['scripted'] = success
 
                 if self.evaluate:
-                    return {'success': eval}
+                    return {'success': success}
 
                 # also save initial pose and orientation
                 results['x'] = init_pose[0][0]
@@ -631,28 +701,12 @@ class Push(Command):
                 results['base_y'] = obj_poses[0][0][1]
                 results['base_theta'] = euler_from_quat(obj_poses[0][1])[2] # yaw around z
 
-                # statistics
-                distance_moved = get_pose_distance(obj_poses[-1], obj_poses[0])[0] 
-                distance_to_goal = get_pose_distance(obj_poses[-1], self.pose.value)[0]
-                print("object moved distance (m): ", distance_moved)
-                print("distance to goal (m): ", distance_to_goal)
-                # check if trajectory is too short (distance-wise)
-                if distance_moved < 0.05:
-                    print('object moved too little.')
-                    break
                 # check if block tips over
-                if len(obj_poses) > 0 and obj_poses[-1][0][-1] < 0.5:
+                if len(obj_poses) > 0 and obj_poses[-1][0][-1] < 0.1:
                     print('block fell.')
                     break
-                # crop the trajectory to the step where the object stops moving
-                last_index = 0
-                for i, pose in enumerate(obj_poses):
-                    if is_pose_close(pose, obj_poses[-1]):
-                        last_index = i
-                        break
-                if last_index == 0: #object didn't move, so don't save trajectory
-                    print('object did not move.')
-                    break
+                last_index = len(dones) - 1
+                print('trajectory length: ', last_index+1)
                 # check if trajectory is too long
                 first_index = 3
                 if last_index >= MAX_HORIZON+first_index:
@@ -662,14 +716,17 @@ class Push(Command):
                 if last_index <= first_index:
                     print('trajectory is too short.')
                     break
-                print('cutting trajectory to ', last_index)
-                pruned_states = states[first_index:last_index]
-                pruned_action_infos = action_infos[first_index:last_index]
-                pruned_goal = obj_poses[last_index][0][:-1] # achieved goal
+                pruned_states = states[first_index:last_index+1]
+                pruned_action_infos = action_infos[first_index:last_index+1]
+                pruned_next_states = next_states[first_index:last_index+1]
+                pruned_actions = [list(dict.values())[0] for dict in pruned_action_infos]
 
                 # if the pruned trajectories contain actions that are too large, don't save
                 if any((abs(action["actions"]).max() > 1.0) for action in pruned_action_infos):
                     print('action is too large.')
+                    for action in pruned_action_infos:
+                            if (abs(action["actions"]).max() > 1.0):
+                                print(abs(action["actions"]).max())
                     break
 
                 if self.directory is not None:
@@ -687,25 +744,22 @@ class Push(Command):
                         state_path,
                         states=np.array(pruned_states),
                         action_infos=pruned_action_infos,
-                        goal=np.array([pruned_goal]),
+                        goal=np.array([goal]),
                         env=env_name,
                     )
 
-                pruned_next_states = next_states[first_index:last_index]
-                pruned_rewards = rewards[first_index:last_index]
-                pruned_dones = dones[first_index:last_index]
-                pruned_actions = [list(dict.values())[0] for dict in pruned_action_infos]
+                pruned_rewards = rewards[first_index:last_index+1] ##
+                pruned_dones = dones[first_index:last_index+1] ##
+                print('dones: ', pruned_dones)
 
-                # condition states and rewards to hindsight goal
-                # KLUDGE: hindsight goal shifts away behavioral goal from desired goal
+
+                # condition states to goal
                 flattened_conditioned_pruned_states = []
                 flattened_conditioned_pruned_next_states = []
                 for state in pruned_states:
-                    flattened_conditioned_pruned_states.append(flatten_state(condition_state(state, pruned_goal))) # goal["obj_pos"]
+                    flattened_conditioned_pruned_states.append(flatten_state(condition_state(state, goal)))
                 for state in pruned_next_states:
-                    flattened_conditioned_pruned_next_states.append(flatten_state(condition_state(state, pruned_goal))) # goal["obj_pos"]
-                pruned_rewards[-1] = 1
-                pruned_dones[-1] = True
+                    flattened_conditioned_pruned_next_states.append(flatten_state(condition_state(state, goal))) 
 
                 trajectory = {
                     'states': flattened_conditioned_pruned_states,  
@@ -724,18 +778,18 @@ class Push(Command):
                         'dones': dones,
                     }
                 else:
-                    if self.evaluate:
-                        try: # read result of heuristic usage
-                            f = open("heuristic.txt", "r")
-                            heuristic_failed = f.read() == "failed"
-                        except Exception:
-                            heuristic_failed = False
-                        trajectory = {
-                            'success': eval,
-                            'heuristic': not heuristic_failed
-                        }
-                    else:
-                        trajectory = log_dict # training
+                    try: # read result of heuristic usage
+                        f = open("heuristic.txt", "r")
+                        heuristic_failed = f.read() == "failed"
+                    except Exception:
+                        heuristic_failed = False
+                    trajectory = {
+                        'init': init_state,
+                        'success': success,
+                        'heuristic': not heuristic_failed,
+                        'jammed': jammed_init,
+                        'logs': log_dict,
+                    }
             return trajectory
     def reverse(self):
         return self.trajectory.reverse()
@@ -770,7 +824,7 @@ def get_align_gen(problem, collisions=False):
         actual_pose.assign()
         approach_vector = APPROACH_DISTANCE*get_unit_vector([0, 0, -1])
         g = get_align(body, target_pose, grasp_length=GRASP_LENGTH)
-        align = Grasp('top', body, g, multiply((approach_vector, unit_quat()), g), get_carry_conf('top'))
+        align = Alignment('top', body, g, multiply((approach_vector, unit_quat()), g), get_carry_conf('top'))
         align.grasp_width = 0.0
         return (align,)
     return fn
@@ -781,7 +835,7 @@ def get_align_gen(problem, collisions=False):
 #   1. does the arm reach pose p? --> IK
 #   2. are there objects along the path? --> collision check
 # generates push trajectories
-def get_push_gen(problem, collisions=True, max_attempts=25, value_function=None, eval_dir=None, friction=False):
+def get_push_gen(problem, collisions=True, max_attempts=25, ignore_traj=False, eval_dir=None, friction=False):
     robot = problem.robot
     obstacles = problem.movable if collisions else []
     def fn(*inputs):
@@ -800,21 +854,16 @@ def get_push_gen(problem, collisions=True, max_attempts=25, value_function=None,
             gripper_pose = poses[-1]
         arm_link = get_gripper_link(robot)
         arm_joints = get_arm_joints(robot)
-        # if policy is given and heuristic was used, will not use trajectory anyways, so return command with fake trajectory
-        try:
-            f = open("heuristic.txt", "r")
-            heuristic_failed = f.read() == "failed"
-        except Exception:
-            heuristic_failed = False
-        if value_function is not None and not heuristic_failed:
-            fake_conf = get_configuration(robot)
-            mt = create_trajectory(robot, arm_joints, [fake_conf])
-            cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
-            return (cmd,)
         push_conf = tiago_inverse_kinematics(robot, gripper_pose)
         if (push_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
             print('Push IK failure')
             return None
+        ## if model is given, will not use trajectory anyways, so return command with fake trajectory
+        if ignore_traj:
+            fake_conf = get_configuration(robot)
+            mt = create_trajectory(robot, arm_joints, [fake_conf])
+            cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
+            return (cmd,)
         if eval_dir is not None: # for getting reachability range
             results = {}
             results['goal'] = np.linalg.norm(np.array(p.value[0][:-1]) - np.array(bq.values[:-1]))
@@ -978,7 +1027,7 @@ def get_ik_arm_fn(problem, custom_limits={}, collisions=True, teleport=False):
         default_conf = grasp.carry
         pose.assign()
         base_conf.assign()
-        open_gripper(robot)
+        close_gripper(robot)
         set_joint_positions(robot, arm_joints, default_conf)
         grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
@@ -1019,6 +1068,7 @@ def get_ik_arm_fn(problem, custom_limits={}, collisions=True, teleport=False):
     return fn
 ##################################################
 
+# KLUDGE: always samples in the cener to align with policy goal
 def get_stable_gen(problem, collisions=True, **kwargs):
     obstacles = problem.fixed if collisions else []
     def gen(body, surface):
@@ -1026,6 +1076,7 @@ def get_stable_gen(problem, collisions=True, **kwargs):
             if surface is None:
                 break
             body_pose = sample_placement(body, surface)
+            body_pose = Posee(point=Point(0., 0., body_pose[0][-1]), euler=euler_from_quat(body_pose[-1]))
             if body_pose is None:
                 break
             p = Pose(body, body_pose, surface)
@@ -1074,9 +1125,6 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
         default_conf = grasp.carry
         arm_joints = get_arm_joints(robot)
         base_joints = get_group_joints(robot, 'base')
-        # if learned:
-            # base_generator = learned_pose_generator(robot, gripper_pose, arm=arm, grasp_type=grasp.grasp_type)
-        # else:
         base_generator = uniform_pose_generator(robot, gripper_pose, reachable_range=reachable_range)
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
         while True:
@@ -1098,7 +1146,7 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
                 yield None
     return gen_fn
 
-def get_ir2_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, learned=True, value_function=None, reach_dir=None, grid_search=True):
+def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True, learned=True, value_function=None, stats=None, reach_dir=None, grid_search=True, viz=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
     gripper = problem.get_gripper()
@@ -1116,9 +1164,9 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=25, collisions=True,
         except Exception:
             heuristic_failed = False
         if learned and value_function is not None and not heuristic_failed:
-            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, value_function, reach_dir, grid_search=grid_search)
+            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, value_function, stats, reach_dir, grid_search=grid_search, viz=viz)
         else:
-            base_generator = custom_pose_generator(robot, gripper_pose, end_pose.value, start_range=(0.45, 0.85), end_range=(0.48, 0.99))
+            base_generator = custom_pose_generator(robot, gripper_pose, end_pose.value)
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
         while True:
             count = 0
@@ -1254,6 +1302,7 @@ def get_motion_gen(problem, collisions=True, teleport=False):
 ##################################################
 
 # returns the arm configuration and the trajectory
+# KLUDGE: trajectory ignores obstacles because the table is considered as one
 def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
@@ -1263,7 +1312,6 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
         print('Using pybullet for inverse kinematics')
         
     def fn(arm, obj, pose1, pose2, grasp, base_conf):
-        approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
         gripper_pose = Posee(point=pose1.value[0] + grasp.value[0], euler=euler_from_quat(grasp.value[1])) # grasp value is in world frame
         approach_pose = multiply(pose1.value, invert(grasp.approach)) # approach value is in object pose frame
         approach_pose = Posee(point=approach_pose[0] + grasp.value[0], euler=euler_from_quat(grasp.value[1])) # grasp value is in world frame
@@ -1272,7 +1320,7 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
         default_conf = grasp.carry
         pose1.assign()
         base_conf.assign()
-        open_gripper(robot)
+        close_gripper(robot)
         set_joint_positions(robot, arm_joints, default_conf)
         grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
@@ -1287,8 +1335,8 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
             resolutions = 0.05**np.ones(len(arm_joints))
             set_joint_positions(robot, arm_joints, default_conf)
             grasp_path = plan_direct_joint_motion(robot, arm_joints, grasp_conf, attachments=attachments.values(),
-                                                  obstacles=approach_obstacles, self_collisions=SELF_COLLISIONS,
-                                                  custom_limits=custom_limits, resolutions=resolutions/2.)
+                                                  self_collisions=SELF_COLLISIONS, custom_limits=custom_limits,
+                                                  resolutions=resolutions/2.)
             if grasp_path is None:
                 print('Grasp path failure')
                 return None
@@ -1300,8 +1348,8 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
     return fn
 
 # returns the base configuration, arm config and arm trajectory
-def get_ik_ir_traj_gen(problem, max_attempts=25, collisions=True, learned=True, teleport=False, value_function=None, reach_dir=None, grid_search=True, **kwargs):
-    ir_sampler = get_ir2_sampler(problem, learned=learned, max_attempts=max_attempts, value_function=value_function, reach_dir=reach_dir, grid_search=grid_search, **kwargs)
+def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, learned=True, teleport=False, value_function=None, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
+    ir_sampler = get_ir2_sampler(problem, learned=learned, max_attempts=max_attempts, value_function=value_function, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
     ik_fn = get_ik_traj_fn(problem, collisions=collisions, teleport=teleport, **kwargs)
     def gen(*inputs):
         _, _, p1, _, _ = inputs
@@ -1412,63 +1460,80 @@ def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
         if pause:
             wait_if_gui()
 
+def get_feasibility_estimate(params, robot, value_function, stats, start_body, gripper_pose, goal_pose, grid=False):
+    if grid:
+        # check if within the annulus first, if not then return zero
+        within_zone = True if point_in_annulus(
+            params[0], params[1], gripper_pose[0][0], gripper_pose[0][1], GRIPPER_REACHABLE_RANGE[0], GRIPPER_REACHABLE_RANGE[1]
+            ) and point_in_annulus(
+                params[0], params[1], goal_pose[0][0], goal_pose[0][1], BLOCK_REACHABLE_RANGE[0], BLOCK_REACHABLE_RANGE[1]
+                ) else False
+        if not within_zone:
+            return np.nan
+        base_values = params
+    else:
+        (radius, theta, phi) = params
+        x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2] #pose2d_from_pose(get_pose(start_pose))[:2]
+        base_values = (x, y, phi)
+    bq = Conf(robot, get_group_joints(robot, 'base'), base_values) # set the base conf
+    bq.assign()
+    state = get_state_wrt_base(robot, start_body)
+    state["tool_pose"] = pose2d_from_pose(get_pose_wrt_base(robot, gripper_pose)) # set tool_pose to gripper_pose
+    state = flatten_state(condition_state(state, get_goal_wrt_base(robot, goal_pose)))
+    if stats is not None:
+        state = normalize_state(state, stats)
+    # w/o uncertainty
+    return value_function(
+        torch.tensor(
+            state.reshape(1, -1), device="cpu", dtype=torch.float32
+        )
+    ).cpu().data.numpy().flatten()
+
 # samples base pose from learned value function
-def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_function, reach_dir, grid_search, max_attempts=25):
-    while True:
+def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_function, stats, reach_dir, grid_search, viz, max_attempts=100):
+    with open("attempts.txt", "r") as f:
+        attempts = int(f.read())
+    if attempts == 0: # if first attempt, run optimization
         x = (-1.2, 1.2)
         y = x
-        theta = (-math.pi, math.pi)
-        block_reachable_range = (0.48, 0.99)
-        gripper_reachable_range = (0.45, 0.85)
+        theta = (0., math.pi) #-math.pi/2
         if reach_dir is not None: # for reachability test
             # compare with uniform
-            base_values = sample_reachable_base(robot, point_from_pose(gripper_pose), reachable_range=gripper_reachable_range)
-            goal_is_reachable = is_reachable(base_values, goal_pose, block_reachable_range)
+            base_values = sample_reachable_base(robot, point_from_pose(gripper_pose), reachable_range=GRIPPER_REACHABLE_RANGE)
+            goal_is_reachable = is_reachable(base_values, goal_pose, BLOCK_REACHABLE_RANGE)
             print('goal block reachability: ', goal_is_reachable)
             results = {}
             if not os.path.exists(reach_dir):
                 print("Making new directory at {}".format(reach_dir))
                 os.makedirs(reach_dir)
-            results['uniform'] = int(goal_is_reachable)
-        def get_feasibility_estimate(params, robot, value_function, start_body, gripper_pose, goal_pose, grid=False):
-            if grid:
-                base_values = params
-            else:
-                (radius, theta, phi) = params
-                x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2] #pose2d_from_pose(get_pose(start_pose))[:2]
-                base_values = (x, y, phi)
-            # set the base conf
-            bq = Conf(robot, get_group_joints(robot, 'base'), base_values)
-            bq.assign()
-            state = get_state_wrt_base(robot, start_body)
-            state["tool_pose"] = pose2d_from_pose(get_pose_wrt_base(robot, gripper_pose)) # set tool_pose to gripper_pose
-            state = flatten_state(condition_state(state, get_goal_wrt_base(robot, goal_pose)))
-            # w/o uncertainty
-            return value_function(
-                torch.tensor(
-                    state.reshape(1, -1), device="cpu", dtype=torch.float32
-                )
-            ).cpu().data.numpy().flatten()
-        
+            results['uniform'] = int(goal_is_reachable)        
         if grid_search: # OPTION 1: GRID SEARCH
-            min_x, max_x, min_y, max_y = (-1.2, 1.2, -1.2, 1.2)
-            grid_num = 20
+            min_x, max_x, min_y, max_y = get_bounding_box(gripper_pose[0], goal_pose[0], 
+                                                            GRIPPER_REACHABLE_RANGE, BLOCK_REACHABLE_RANGE)
+            grid_num = 15
             param1_range = np.linspace(start=min_x, stop=max_x, num=grid_num)
             param2_range = np.linspace(start=min_y, stop=max_y, num=grid_num)
-            param3_range = np.linspace(start=theta[0], stop=theta[-1], num=grid_num)
+            param3_range = np.linspace(start=theta[0], stop=theta[-1], num=2)
             best_metric = 0
             best_params = None
-            grid_data = np.zeros((param1_range.size, param2_range.size, param3_range.size))
+            grid_shape = (param1_range.size, param2_range.size, param3_range.size)
+            grid_data = np.zeros(grid_shape)
             start = time.time()
             for i, param1 in enumerate(param1_range):
                 for j, param2 in enumerate(param2_range):
                     for k, param3 in enumerate(param3_range):
                         params = (param1, param2, param3)
-                        metric = get_feasibility_estimate(params, robot, value_function, start_body, gripper_pose, goal_pose, grid=True)
+                        metric = get_feasibility_estimate(params, robot, value_function, stats, start_body, gripper_pose, goal_pose, grid=True)
                         grid_data[i, j, k] = metric
             end = time.time()
             print('execution time (s): ', end-start)
-            grid = np.max(grid_data, 2) # only x and y
+            # replace nan's with the worst 2d value for visualization
+            grid_data_2d = np.nanmax(grid_data, 2)
+            worst_value_2d = np.nanmin(grid_data_2d)
+            print('worst value: ', worst_value_2d)
+            grid_data = np.nan_to_num(grid_data, nan=worst_value_2d)
+            if viz:
+                grid = np.max(grid_data, 2) # only x and y
             sorted_indices = sort_3d_array_indices_desc(grid_data)
             indices = sorted_indices.pop(0)
             best_params = (param1_range[indices[0]], param2_range[indices[1]], param3_range[indices[2]])
@@ -1476,24 +1541,21 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
             best_metric = grid_data[indices]
             # check that the base is in the reachable zone
             print('grid search: ')
-            init_is_reachable = is_reachable(best_params, get_pose(start_body), gripper_reachable_range)
-            print('initial block pose reachability: ', init_is_reachable)
-            goal_is_reachable = is_reachable(best_params, goal_pose, block_reachable_range)
-            print('goal block pose reachability: ', goal_is_reachable)
             # Output the best metric and the corresponding parameters
             print('Best metric:', best_metric)
-            print('Best parameters:', best_params)
-            show_heatmap(grid)
+            if viz:
+                show_heatmap(grid)
             learned_base_values = best_params
         else:
             from scipy.optimize import minimize
             method = 'Nelder-Mead' #'Nelder-Mead' #'L-BFGS-B' #'Powell'
             # bounds = ((min_x, max_x), (min_y, max_y), (-math.pi, math.pi))
-            bounds = (gripper_reachable_range, (-math.pi, math.pi), (-math.pi, math.pi))
+            bounds = (GRIPPER_REACHABLE_RANGE, (-math.pi, math.pi), (-math.pi, math.pi))
             initial_guess = [mean(bound) for bound in bounds]
-            objective = lambda params, robot, value_function, start_pose, gripper_pose, goal_pose: -get_feasibility_estimate(
-                params, robot, value_function, start_pose, gripper_pose, goal_pose
-            )
+            def objective(params, robot, value_function, start_pose, gripper_pose, goal_pose):
+                return -get_feasibility_estimate(
+                            params, robot, value_function, stats, start_pose, gripper_pose, goal_pose
+                        )
             from functools import partial
             partial_obj = partial(
                 objective, 
@@ -1514,14 +1576,19 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
             x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2]
             learned_base_values = (x, y, phi)
             learned_base_values = maybe_flip_phi(learned_base_values, start_body)
-            print('Best parameters:', learned_base_values)
-            # check that the base is in the reachable zone
-            init_is_reachable = is_reachable(learned_base_values, get_pose(start_body), gripper_reachable_range)
-            print('initial block pose reachability: ', init_is_reachable)
-            goal_is_reachable = is_reachable(learned_base_values, goal_pose, block_reachable_range, epsilon=0.07)
-            print('goal block pose reachability: ', goal_is_reachable)
             wait_if_gui()
                 
+        print('Best parameters:', learned_base_values)
+        # check that the base is in the reachable zone
+        init_is_reachable = is_reachable(learned_base_values, gripper_pose, GRIPPER_REACHABLE_RANGE)
+        print('initial block pose reachability: ', init_is_reachable)
+        goal_is_reachable = is_reachable(learned_base_values, goal_pose, BLOCK_REACHABLE_RANGE) # epsilon=0.07
+        print('goal block pose reachability: ', goal_is_reachable)
+
+        # write result to write
+        with open("learned_base_values.txt", "w") as f:
+            for base_value in learned_base_values:
+                f.write(f"{base_value}\n")
         if reach_dir is not None: # for reachability test
             results['policy'] = int(goal_is_reachable)
             t1, t2 = str(time.time()).split(".")
@@ -1532,34 +1599,51 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
             )
             time.sleep(0.2) # KLUDGE: give time before program crashes
             yield None
+    else: # if not first attempt, read from file
+        with open("learned_base_values.txt", "r") as f:
+            learned_base_values = tuple(float(line.strip()) for line in f)
+    while True:
+        if max_attempts <= attempts: # revert to baseline
+            attempts = 0
+            with open("heuristic.txt", "w") as f:
+                f.write("failed")
+            with open("attempts.txt", "w") as f:
+                f.write("0")
+            with open("learned_base_values.txt", "w") as f:
+                f.write("")
+            print('heuristic failed.')
+            break
+        attempts += 1
+        reachable_base_values = None
+        for _ in range(50): # sample base pose within the reachable zone
+            base_values = perturb_base(learned_base_values, perturb_range=(0.0, 0.1))
+            if point_in_annulus(
+                base_values[0], base_values[1], gripper_pose[0][0], gripper_pose[0][1], 
+                GRIPPER_REACHABLE_RANGE[0], GRIPPER_REACHABLE_RANGE[1]
+                ) and point_in_annulus(
+                    base_values[0], base_values[1], goal_pose[0][0], goal_pose[0][1], 
+                    BLOCK_REACHABLE_RANGE[0], BLOCK_REACHABLE_RANGE[1]
+                    ):
+                reachable_base_values = base_values
+                break
+        if reachable_base_values is not None:
+            with open("attempts.txt", "w") as f:
+                f.write(str(attempts))
+            yield base_values
         else:
-            if goal_is_reachable:
-                yield learned_base_values
-                attempts = 0
-                while True:
-                    if max_attempts <= attempts: # revert to baseline
-                        attempts = 0
-                        with open("heuristic.txt", "w") as f:
-                            f.write("failed")
-                        break
-                    attempts += 1
-                    base_values = perturb_base(robot, learned_base_values, reachable_range=(0.0, 0.05))
-                    # print(sample_state(base_values, robot, start_pose, gripper_pose))
-                    yield base_values
-                    wait_if_gui()
-                while True:
-                    base_values = sample_reachable_base2(robot, point_from_pose(gripper_pose), point_from_pose(goal_pose), start_range=(0.45, 0.85), end_range=(0.48, 0.99))
-                    if base_values is None:
-                        break
-                    yield base_values
-            else: # revert to baseline
-                with open("heuristic.txt", "w") as f:
-                    f.write("failed")
-                while True:
-                    base_values = sample_reachable_base2(robot, point_from_pose(gripper_pose), point_from_pose(goal_pose), start_range=(0.45, 0.85), end_range=(0.48, 0.99))
-                    if base_values is None:
-                        break
-                    yield base_values
+            with open("heuristic.txt", "w") as f:
+                f.write("failed")
+            with open("attempts.txt", "w") as f:
+                f.write("0")
+            with open("learned_base_values.txt", "w") as f:
+                f.write("")
+            print('heuristic failed (not reachable).')
+            break
+    while True:
+        base_values = sample_reachable_base2(robot, point_from_pose(gripper_pose), point_from_pose(goal_pose))
+        if base_values is None:
+            break
+        yield base_values
 
 def list_to_numpy(dict_of_list):
     dic = OrderedDict()

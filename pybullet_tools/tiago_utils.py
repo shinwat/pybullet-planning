@@ -160,15 +160,16 @@ def maybe_flip_phi(base_values, start_pose):
     (x, y, phi) = base_values
     if x > pose2d_from_pose(get_pose(start_pose))[0] and abs(phi) < np.pi/2:
         phi = wrap_angle(phi + np.pi)
+    if x < pose2d_from_pose(get_pose(start_pose))[0] and abs(phi) > np.pi/2:
+        phi = wrap_angle(phi + np.pi)
     return (x, y, phi)
 
-def perturb_base(robot, point, reachable_range=(0.0, 0.05)):
-    #TODO: figure out how much is acceptable amount
-    #KLUDGE: it can go outside of the reachability range
-    radius = np.random.uniform(*reachable_range)
-    x, y = radius*unit_from_theta(np.random.uniform(-np.pi, np.pi)) + point[:2]
-    yaw = wrap_angle(point[-1] + np.random.uniform(-np.pi/20, np.pi/20))
-    base_values = (x, y, yaw)
+# KLUDGE: it can go outside of the reachability range
+def perturb_base(pose2d, perturb_range=(0.0, 0.05)):
+    radius = np.random.uniform(*perturb_range)
+    angle = np.random.uniform(-np.pi, np.pi)
+    x, y = radius*unit_from_theta(angle) + pose2d[:2]
+    base_values = (x, y, pose2d[-1])
     return base_values
 
 def sort_3d_array_indices_desc(arr):
@@ -187,8 +188,15 @@ def show_heatmap(grid):
 
 def get_gripper_state(pose):
     pos, quat = pose
+    x, y, _ = pos
     _, _, yaw = euler_from_quat(quat)
-    return (pos[0], pos[1], np.sin(yaw), np.cos(yaw))
+    return (x, y, np.sin(yaw), np.cos(yaw))
+
+def get_gripper_consts(pose):
+    pos, quat = pose
+    _, _, z = pos
+    roll, pitch, _ = euler_from_quat(quat)
+    return (roll, pitch, z)
 
 def pose2d_from_pose(pose):
     (point, quat) = pose

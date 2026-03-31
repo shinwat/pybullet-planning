@@ -3860,7 +3860,7 @@ def sample_reachable_base2(robot, start, end, start_range=(0.45, 0.85), end_rang
             ) and point_in_annulus(
                 sampled_x, sampled_y, end[0], end[1], end_range[0], end_range[1]
                 ):
-            yaw = np.random.uniform(*CIRCULAR_LIMITS)
+            yaw = np.random.choice([0., np.pi]) #.uniform(*CIRCULAR_LIMITS)
             base_values = (sampled_x, sampled_y, yaw)
             return base_values
 
