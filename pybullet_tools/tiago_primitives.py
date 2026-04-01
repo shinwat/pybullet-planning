@@ -475,10 +475,10 @@ class Push(Command):
                     if desired_joint_state is None:
                         state =  condition_state(get_state_wrt_base(self.robot, self.body), goal)
                         return state, -1, True, 0.
-                    # stuck = False
+                    stuck = False
                     if self.jammed:
                         if desired_joint_state[0] < old_joint_value and old_joint_value > np.pi/2: # only left pushes
-                            # stuck = True
+                            stuck = True
                             desired_joint_state[0] = old_joint_value
                     old_joint_value = desired_joint_state[0]
                     sim_time = 0.0
@@ -495,8 +495,8 @@ class Push(Command):
                         reward = - dist
                     elif done:
                         reward = 0
-                    # elif stuck:
-                    #     reward = -2
+                    elif stuck:
+                        reward = -2
                     else:
                         reward = -1
                     return state, reward, done, old_joint_value
