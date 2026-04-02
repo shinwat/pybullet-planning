@@ -52,6 +52,7 @@ ACTION_NORM_CONST = (MAX_JOINT_VELOCITIES / CONTROL_FREQ).tolist()
 GRIPPER_NORM_COST = [0.05, 0.05, 0.05, 0.05] # [m, m, rad, rad]/step
 BLOCK_REACHABLE_RANGE = (0.48, 0.99)
 GRIPPER_REACHABLE_RANGE = (0.45, 0.85) #85 | 70
+MAX_PERTURBATION = 0.1
 
 ##################################################
 
@@ -520,34 +521,19 @@ class Push(Command):
                     jammed_init = jammed_init and self.jammed
                     if jammed_init:
                         print('arm is jammed.')
-                    max_action = float(1)
                     old_joint_value = get_joint_positions(self.robot, joints)[0]
 
                     if self.evaluate:
                         model.actor.eval()
                     for i in range(horizon):
-                        if self.evaluate:
-                            action = model.actor.act(state, device="cpu")
+                        fallback = False
+                        for _ in range(100):
+                            action = model.actor.act(state, device=model.device, fallback=fallback)
                             desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
-                            for _ in range(100): # if IK fails, revert to sample
-                                if desired_joint_state is None:
-                                    action = model.actor.act(state, device="cpu", fallback=True)
-                                    desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
-                                else:
-                                    break
-                        else:
-                            actor = model.actor(
-                                torch.tensor(
-                                    state.reshape(1, -1), device="cpu", dtype=torch.float32
-                                )
-                            )
-                            for _ in range(100): # try IK many times
-                                action = actor.sample()
-                                action = torch.clamp(max_action * action, -max_action, max_action)
-                                action = action.cpu().data.numpy().flatten()
-                                desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
-                                if desired_joint_state is not None:
-                                    break
+                            if desired_joint_state is None:
+                                fallback = True
+                            else:
+                                break
 
                         next_state, reward, done, old_joint_value = step(desired_joint_state, old_joint_value)
                         
@@ -1146,10 +1132,9 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
                 yield None
     return gen_fn
 
-def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True, learned=True, value_function=None, stats=None, reach_dir=None, grid_search=True, viz=False):
+def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True, model=None, stats=None, reach_dir=None, grid_search=True, viz=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
-    gripper = problem.get_gripper()
 
     def gen_fn(arm, obj, pose, end_pose, grasp):
         pose.assign()
@@ -1163,8 +1148,8 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True
             heuristic_failed = f.read() == "failed"
         except Exception:
             heuristic_failed = False
-        if learned and value_function is not None and not heuristic_failed:
-            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, value_function, stats, reach_dir, grid_search=grid_search, viz=viz)
+        if model is not None and not heuristic_failed:
+            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, model, stats, reach_dir, grid_search=grid_search, viz=viz)
         else:
             base_generator = custom_pose_generator(robot, gripper_pose, end_pose.value)
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
@@ -1348,8 +1333,8 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
     return fn
 
 # returns the base configuration, arm config and arm trajectory
-def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, learned=True, teleport=False, value_function=None, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
-    ir_sampler = get_ir2_sampler(problem, learned=learned, max_attempts=max_attempts, value_function=value_function, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
+def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, teleport=False, model=None, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
+    ir_sampler = get_ir2_sampler(problem, max_attempts=max_attempts, model=model, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
     ik_fn = get_ik_traj_fn(problem, collisions=collisions, teleport=teleport, **kwargs)
     def gen(*inputs):
         _, _, p1, _, _ = inputs
@@ -1460,7 +1445,7 @@ def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
         if pause:
             wait_if_gui()
 
-def get_feasibility_estimate(params, robot, value_function, stats, start_body, gripper_pose, goal_pose, grid=False):
+def get_feasibility_estimate(params, robot, model, stats, start_body, gripper_pose, goal_pose, grid=False):
     if grid:
         # check if within the annulus first, if not then return zero
         within_zone = True if point_in_annulus(
@@ -1483,14 +1468,14 @@ def get_feasibility_estimate(params, robot, value_function, stats, start_body, g
     if stats is not None:
         state = normalize_state(state, stats)
     # w/o uncertainty
-    return value_function(
+    return model.vf.v(
         torch.tensor(
-            state.reshape(1, -1), device="cpu", dtype=torch.float32
+            state.reshape(1, -1), device=model.device, dtype=torch.float32
         )
     ).cpu().data.numpy().flatten()
 
 # samples base pose from learned value function
-def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_function, stats, reach_dir, grid_search, viz, max_attempts=100):
+def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, stats, reach_dir, grid_search, viz, max_attempts=100):
     with open("attempts.txt", "r") as f:
         attempts = int(f.read())
     if attempts == 0: # if first attempt, run optimization
@@ -1523,7 +1508,7 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
                 for j, param2 in enumerate(param2_range):
                     for k, param3 in enumerate(param3_range):
                         params = (param1, param2, param3)
-                        metric = get_feasibility_estimate(params, robot, value_function, stats, start_body, gripper_pose, goal_pose, grid=True)
+                        metric = get_feasibility_estimate(params, robot, model, stats, start_body, gripper_pose, goal_pose, grid=True)
                         grid_data[i, j, k] = metric
             end = time.time()
             print('execution time (s): ', end-start)
@@ -1552,15 +1537,15 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
             # bounds = ((min_x, max_x), (min_y, max_y), (-math.pi, math.pi))
             bounds = (GRIPPER_REACHABLE_RANGE, (-math.pi, math.pi), (-math.pi, math.pi))
             initial_guess = [mean(bound) for bound in bounds]
-            def objective(params, robot, value_function, start_pose, gripper_pose, goal_pose):
+            def objective(params, robot, model, start_pose, gripper_pose, goal_pose):
                 return -get_feasibility_estimate(
-                            params, robot, value_function, stats, start_pose, gripper_pose, goal_pose
+                            params, robot, model, stats, start_pose, gripper_pose, goal_pose
                         )
             from functools import partial
             partial_obj = partial(
                 objective, 
                 robot=robot,
-                value_function=value_function,
+                model=model,
                 start_pose=start_body,
                 gripper_pose=gripper_pose,
                 goal_pose=goal_pose
@@ -1616,7 +1601,7 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, value_fun
         attempts += 1
         reachable_base_values = None
         for _ in range(50): # sample base pose within the reachable zone
-            base_values = perturb_base(learned_base_values, perturb_range=(0.0, 0.1))
+            base_values = perturb_base(learned_base_values, perturb_range=(0.0, MAX_PERTURBATION))
             if point_in_annulus(
                 base_values[0], base_values[1], gripper_pose[0][0], gripper_pose[0][1], 
                 GRIPPER_REACHABLE_RANGE[0], GRIPPER_REACHABLE_RANGE[1]
