@@ -778,8 +778,8 @@ class Push(Command):
                     }
                 else:
                     try: # read result of heuristic usage
-                        f = open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r")
-                        heuristic_failed = f.read() == "failed"
+                        with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r") as f:
+                            heuristic_failed = f.read() == "failed"
                     except Exception:
                         heuristic_failed = False
                     trajectory = {
@@ -1152,15 +1152,15 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
         if skill_modules is not None:
             # KLUDGE: read from file to check if heuristic failed
             try:
-                f = open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r")
-                heuristic_failed = f.read() == "failed"
+                with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r") as f:
+                    heuristic_failed = f.read() == "failed"
             except Exception:
                 heuristic_failed = False
             # KLDUGE: read from file to check which value function to use
             if not heuristic_failed:
                 try:
-                    f = open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r")
-                    stream_pairs = f.read()
+                    with open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r") as f:
+                        stream_pairs = f.read()
                 except Exception:
                     stream_pairs = None
                 if stream_pairs is not None:
