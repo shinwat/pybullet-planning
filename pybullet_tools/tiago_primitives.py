@@ -12,6 +12,8 @@ from statistics import mean
 import numpy as np
 import torch
 
+from pddlstream.algorithms.skills import recover_skill_model_from_stream_pairs, TEMP_SKILLS_DIR
+
 from .ikfast.utils import USE_CURRENT
 from .ikfast.tiago.ik import get_base, get_pose_wrt_base, get_tool_pose, get_tool_pose_wrt_base, \
     is_ik_compiled, tiago_inverse_kinematics, sample_tool_ik
@@ -52,7 +54,8 @@ ACTION_NORM_CONST = (MAX_JOINT_VELOCITIES / CONTROL_FREQ).tolist()
 GRIPPER_NORM_COST = [0.05, 0.05, 0.05, 0.05] # [m, m, rad, rad]/step
 BLOCK_REACHABLE_RANGE = (0.48, 0.99)
 GRIPPER_REACHABLE_RANGE = (0.45, 0.85) #85 | 70
-MAX_PERTURBATION = 0.1
+MAX_PERTURBATION = 0.15
+HEURISTIC_ATTEMPTS = 50
 
 ##################################################
 
@@ -407,13 +410,13 @@ def get_goal(robot, pose):
     return {"obj_pos" : goal_pos}
 
 class Push(Command):
-    def __init__(self, robot, body, pose, trajectory, directory=None, policy=None, evaluate=False, collect_dir=None, bootstrap=False, ablation=False, buffer=None, stats=None, demo_path=None, dense=False, jammed=False):
+    def __init__(self, robot, body, pose, trajectory, directory=None, model=None, evaluate=False, collect_dir=None, bootstrap=False, ablation=False, buffer=None, stats=None, demo_path=None, dense=False, jammed=False):
         self.robot = robot
         self.body = body
         self.pose = pose
         self.trajectory = trajectory
         self.directory = directory
-        self.policy = policy
+        self.model = model
         self.buffer = buffer
         self.evaluate = evaluate
         self.collect_dir = collect_dir
@@ -432,6 +435,10 @@ class Push(Command):
         log_dict = None
         while True:
             results = {}
+            obj_pose = get_pose_wrt_base(self.robot, get_pose(self.body))
+            if obj_pose[0][-1] < 0.1:
+                print('block is on the floor.')
+                break
             goal = get_goal_wrt_base(self.robot, self.pose.value)
             horizon = EVAL_HORIZON if self.evaluate and self.directory is None else MAX_HORIZON
             joints = get_arm_joints(self.robot)
@@ -459,7 +466,7 @@ class Push(Command):
                 )
                 break
 
-            if self.policy is not None:
+            if self.model is not None:
                 def convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state):
                     (roll, pitch, z) = gripper_consts
                     unnormed_action = list(map(mul, action, GRIPPER_NORM_COST))
@@ -476,14 +483,12 @@ class Push(Command):
                     if desired_joint_state is None:
                         state =  condition_state(get_state_wrt_base(self.robot, self.body), goal)
                         return state, -1, True, 0.
-                    stuck = False
                     if self.jammed:
                         if desired_joint_state[0] < old_joint_value and old_joint_value > np.pi/2: # only left pushes
-                            stuck = True
                             desired_joint_state[0] = old_joint_value
                     old_joint_value = desired_joint_state[0]
                     sim_time = 0.0
-                    for _ in joint_controller_hold(self.robot, joints, desired_joint_state):
+                    for _ in joint_controller_hold(self.robot, joints, desired_joint_state, velocity_scale=0.1):
                         step_simulation()
                         sim_time += sim_dt
                         if sim_time > 1/CONTROL_FREQ:
@@ -496,8 +501,6 @@ class Push(Command):
                         reward = - dist
                     elif done:
                         reward = 0
-                    elif stuck:
-                        reward = -2
                     else:
                         reward = -1
                     return state, reward, done, old_joint_value
@@ -527,8 +530,18 @@ class Push(Command):
                         model.actor.eval()
                     for i in range(horizon):
                         fallback = False
-                        for _ in range(100):
-                            action = model.actor.act(state, device=model.device, fallback=fallback)
+                        for _ in range(10):
+                            if self.evaluate:
+                                action = model.actor.act(state, device=model.device, fallback=fallback)
+                            else:
+                                actor = model.actor(
+                                    torch.tensor(
+                                        state.reshape(1, -1), device=model.device, dtype=torch.float32
+                                    )
+                                )
+                                action = actor.sample()
+                                action = torch.clamp(1 * action, -1, 1)
+                                action = action.cpu().data.numpy().flatten()
                             desired_joint_state = convert_action_to_desired_joint_state(action, gripper_consts, old_gripper_state)
                             if desired_joint_state is None:
                                 fallback = True
@@ -590,7 +603,7 @@ class Push(Command):
                     return success, jammed_init, logs
                 
                 wait_if_gui()
-                success, jammed_init, log_dict = rollout_corl(self.policy, self.buffer)
+                success, jammed_init, log_dict = rollout_corl(self.model, self.buffer)
                 print('success:', success)
 
             if not self.bootstrap:
@@ -642,7 +655,7 @@ class Push(Command):
                         print('reached maximum horizon.')
                         break
                     states.append(state)
-                    for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values)):
+                    for i, _ in enumerate(joint_controller_hold(conf.body, conf.joints, conf.values, velocity_scale=0.1)):
                         step_simulation()
                         sim_time += sim_dt
                         if sim_time > 1/CONTROL_FREQ:
@@ -765,7 +778,7 @@ class Push(Command):
                     }
                 else:
                     try: # read result of heuristic usage
-                        f = open("heuristic.txt", "r")
+                        f = open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r")
                         heuristic_failed = f.read() == "failed"
                     except Exception:
                         heuristic_failed = False
@@ -842,7 +855,7 @@ def get_push_gen(problem, collisions=True, max_attempts=25, ignore_traj=False, e
         arm_joints = get_arm_joints(robot)
         push_conf = tiago_inverse_kinematics(robot, gripper_pose)
         if (push_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
-            print('Push IK failure')
+            # print('Push IK failure')
             return None
         ## if model is given, will not use trajectory anyways, so return command with fake trajectory
         if ignore_traj:
@@ -872,7 +885,7 @@ def get_push_gen(problem, collisions=True, max_attempts=25, ignore_traj=False, e
         for pose in interpolate_poses(init_gripper_pose, gripper_pose, pos_step_size=0.05):
             conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, pose)
             if (conf is None) or any(pairwise_collision(robot, b) for b in blocks):
-                print('Approach IK failure')
+                # print('Approach IK failure')
                 return None
             conf = get_joint_positions(robot, arm_joints)
             approach_confs.append(conf)
@@ -890,12 +903,8 @@ def get_push_gen(problem, collisions=True, max_attempts=25, ignore_traj=False, e
                 return None
             path += push_path
             sub_inverse_kinematics(robot, arm_joints[0], arm_link, waypoints[i])
-        # if not estimate_feasibility(robot, o, p, policy_dir):
-        #     print("Not deemed feasible.")
-        #     return None
         mt = create_trajectory(robot, arm_joints, path)
         cmd = Commands(State(attachments=attachments), savers=[BodySaver(robot)], commands=[mt])
-        # record_feasibility(1, robot, o, p, policy_dir, eval_dir)
         return (cmd,)
     return fn
 
@@ -999,10 +1008,7 @@ def get_hook_ik_ir_traj_gen(problem, max_attempts=25, collisions=True,learned=Fa
 def get_ik_arm_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
-    if is_ik_compiled():
-        print('Using ikfast for inverse kinematics')
-    else:
-        print('Using pybullet for inverse kinematics')
+    is_ik_compiled()
         
     def fn(arm, obj, pose, grasp, base_conf):
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)} # it doesn't check for table collision?
@@ -1132,7 +1138,7 @@ def get_ir_sampler(problem, custom_limits={}, max_attempts=25, collisions=True, 
                 yield None
     return gen_fn
 
-def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True, model=None, stats=None, reach_dir=None, grid_search=True, viz=False):
+def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=None, skill_modules=None, collisions=True, stats=None, reach_dir=None, grid_search=True, viz=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
 
@@ -1142,14 +1148,27 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True
         default_conf = grasp.carry
         arm_joints = get_arm_joints(robot)
         base_joints = get_group_joints(robot, 'base')
-        # KLUDGE: read from file to check if heuristic failed
-        try:
-            f = open("heuristic.txt", "r")
-            heuristic_failed = f.read() == "failed"
-        except Exception:
-            heuristic_failed = False
-        if model is not None and not heuristic_failed:
-            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, model, stats, reach_dir, grid_search=grid_search, viz=viz)
+        skill_model = None
+        if skill_modules is not None:
+            # KLUDGE: read from file to check if heuristic failed
+            try:
+                f = open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r")
+                heuristic_failed = f.read() == "failed"
+            except Exception:
+                heuristic_failed = False
+            # KLDUGE: read from file to check which value function to use
+            if not heuristic_failed:
+                try:
+                    f = open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r")
+                    stream_pairs = f.read()
+                except Exception:
+                    stream_pairs = None
+                if stream_pairs is not None:
+                    # filter the pairs to ones with the stream corresponding to this sampler
+                    skill_model = recover_skill_model_from_stream_pairs(stream_pairs, skill_modules, stream_name)
+              # skill_model = skill_modules['push']['plan_push_motion'].vf.v # expected
+        if skill_model is not None:
+           base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, skill_model, stats, reach_dir, grid_search=grid_search, viz=viz)
         else:
             base_generator = custom_pose_generator(robot, gripper_pose, end_pose.value)
         lower_limits, upper_limits = get_custom_limits(robot, base_joints, custom_limits)
@@ -1177,10 +1196,7 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, collisions=True
 def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
-    if is_ik_compiled():
-        print('Using ikfast for inverse kinematics')
-    else:
-        print('Using pybullet for inverse kinematics')
+    is_ik_compiled()
         
     def fn(arm, obj, pose, grasp, base_conf):
         approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
@@ -1291,10 +1307,7 @@ def get_motion_gen(problem, collisions=True, teleport=False):
 def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
     obstacles = problem.fixed if collisions else []
-    if is_ik_compiled():
-        print('Using ikfast for inverse kinematics')
-    else:
-        print('Using pybullet for inverse kinematics')
+    is_ik_compiled()
         
     def fn(arm, obj, pose1, pose2, grasp, base_conf):
         gripper_pose = Posee(point=pose1.value[0] + grasp.value[0], euler=euler_from_quat(grasp.value[1])) # grasp value is in world frame
@@ -1333,8 +1346,8 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
     return fn
 
 # returns the base configuration, arm config and arm trajectory
-def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, teleport=False, model=None, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
-    ir_sampler = get_ir2_sampler(problem, max_attempts=max_attempts, model=model, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
+def get_ik_ir_traj_gen(problem, stream_name=None, skill_modules=None, max_attempts=100, collisions=True, teleport=False, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
+    ir_sampler = get_ir2_sampler(problem, max_attempts=max_attempts, stream_name=stream_name, skill_modules=skill_modules, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
     ik_fn = get_ik_traj_fn(problem, collisions=collisions, teleport=teleport, **kwargs)
     def gen(*inputs):
         _, _, p1, _, _ = inputs
@@ -1356,7 +1369,7 @@ def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, teleport=Fals
             ik_outputs = ik_fn(*(inputs + ir_outputs))
             if ik_outputs is None:
                 continue
-            print('IK attempts:', attempts)
+            # print('IK attempts:', attempts)
             yield ir_outputs + ik_outputs
             return
     return gen
@@ -1367,10 +1380,7 @@ def get_ik_ir_traj_gen(problem, max_attempts=100, collisions=True, teleport=Fals
 def get_ik_only_fn(problem, custom_limits={}, collisions=True, teleport=False):
     robot = problem.robot
     # obstacles = problem.fixed if collisions else []
-    if is_ik_compiled():
-        print('Using ikfast for inverse kinematics')
-    else:
-        print('Using pybullet for inverse kinematics')
+    is_ik_compiled()
         
     def fn(_, obj, pose, grasp, base_conf):
         # approach_obstacles = {obst for obst in obstacles if not is_placement(obj, obst)}
@@ -1425,7 +1435,7 @@ def control_commands(commands, **kwargs):
     enable_gravity()
     trajectories = []
     for i, command in enumerate(commands):
-        print(i, command)
+        # print(i, command)
         trajectories.append(command.control(*kwargs))
     return trajectories
 
@@ -1445,28 +1455,7 @@ def apply_commands(state, commands, time_step=None, pause=False, **kwargs):
         if pause:
             wait_if_gui()
 
-def get_feasibility_estimate(params, robot, model, stats, start_body, gripper_pose, goal_pose, grid=False):
-    if grid:
-        # check if within the annulus first, if not then return zero
-        within_zone = True if point_in_annulus(
-            params[0], params[1], gripper_pose[0][0], gripper_pose[0][1], GRIPPER_REACHABLE_RANGE[0], GRIPPER_REACHABLE_RANGE[1]
-            ) and point_in_annulus(
-                params[0], params[1], goal_pose[0][0], goal_pose[0][1], BLOCK_REACHABLE_RANGE[0], BLOCK_REACHABLE_RANGE[1]
-                ) else False
-        if not within_zone:
-            return np.nan
-        base_values = params
-    else:
-        (radius, theta, phi) = params
-        x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2] #pose2d_from_pose(get_pose(start_pose))[:2]
-        base_values = (x, y, phi)
-    bq = Conf(robot, get_group_joints(robot, 'base'), base_values) # set the base conf
-    bq.assign()
-    state = get_state_wrt_base(robot, start_body)
-    state["tool_pose"] = pose2d_from_pose(get_pose_wrt_base(robot, gripper_pose)) # set tool_pose to gripper_pose
-    state = flatten_state(condition_state(state, get_goal_wrt_base(robot, goal_pose)))
-    if stats is not None:
-        state = normalize_state(state, stats)
+def get_feasibility_estimate(model, state):
     # w/o uncertainty
     return model.vf.v(
         torch.tensor(
@@ -1474,9 +1463,32 @@ def get_feasibility_estimate(params, robot, model, stats, start_body, gripper_po
         )
     ).cpu().data.numpy().flatten()
 
+def get_state_from_base_values(base_values, robot, stats, start_body, gripper_pose, goal_pose):
+    bq = Conf(robot, get_group_joints(robot, 'base'), base_values) # set the base conf
+    bq.assign()
+    state = get_state_wrt_base(robot, start_body)
+    state["tool_pose"] = pose2d_from_pose(get_pose_wrt_base(robot, gripper_pose)) # set tool_pose to gripper_pose
+    state = flatten_state(condition_state(state, get_goal_wrt_base(robot, goal_pose)))
+    if stats is not None:
+        state = normalize_state(state, stats)
+    return state
+
+# check if within the annulus first, if not then return zero
+def is_within_annulus(params, gripper_pose, goal_pose):
+    return True if point_in_annulus(
+        params[0], params[1], gripper_pose[0][0], gripper_pose[0][1], GRIPPER_REACHABLE_RANGE[0], GRIPPER_REACHABLE_RANGE[1]
+        ) and point_in_annulus(
+            params[0], params[1], goal_pose[0][0], goal_pose[0][1], BLOCK_REACHABLE_RANGE[0], BLOCK_REACHABLE_RANGE[1]
+            ) else False
+
+def get_base_values(params, gripper_pose):
+    (radius, theta, phi) = params
+    x, y = radius*unit_from_theta(theta) + gripper_pose[0][:2] #pose2d_from_pose(get_pose(start_pose))[:2]
+    return (x, y, phi)
+
 # samples base pose from learned value function
 def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, stats, reach_dir, grid_search, viz, max_attempts=100):
-    with open("attempts.txt", "r") as f:
+    with open(os.path.join(TEMP_SKILLS_DIR,"attempts.txt"), "r") as f:
         attempts = int(f.read())
     if attempts == 0: # if first attempt, run optimization
         x = (-1.2, 1.2)
@@ -1498,37 +1510,30 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
             grid_num = 15
             param1_range = np.linspace(start=min_x, stop=max_x, num=grid_num)
             param2_range = np.linspace(start=min_y, stop=max_y, num=grid_num)
-            param3_range = np.linspace(start=theta[0], stop=theta[-1], num=2)
-            best_metric = 0
+            param3_range = np.linspace(start=theta[0], stop=theta[-1], num=len(theta))
             best_params = None
             grid_shape = (param1_range.size, param2_range.size, param3_range.size)
             grid_data = np.zeros(grid_shape)
-            start = time.time()
             for i, param1 in enumerate(param1_range):
                 for j, param2 in enumerate(param2_range):
                     for k, param3 in enumerate(param3_range):
                         params = (param1, param2, param3)
-                        metric = get_feasibility_estimate(params, robot, model, stats, start_body, gripper_pose, goal_pose, grid=True)
+                        if is_within_annulus(params, gripper_pose, goal_pose):
+                            state = get_state_from_base_values(params, robot, stats, start_body, gripper_pose, goal_pose)
+                            metric = get_feasibility_estimate(model, state)
+                        else:
+                            metric = np.nan
                         grid_data[i, j, k] = metric
-            end = time.time()
-            print('execution time (s): ', end-start)
             # replace nan's with the worst 2d value for visualization
             grid_data_2d = np.nanmax(grid_data, 2)
             worst_value_2d = np.nanmin(grid_data_2d)
-            print('worst value: ', worst_value_2d)
             grid_data = np.nan_to_num(grid_data, nan=worst_value_2d)
-            if viz:
-                grid = np.max(grid_data, 2) # only x and y
             sorted_indices = sort_3d_array_indices_desc(grid_data)
             indices = sorted_indices.pop(0)
             best_params = (param1_range[indices[0]], param2_range[indices[1]], param3_range[indices[2]])
             best_params = maybe_flip_phi(best_params, start_body)
-            best_metric = grid_data[indices]
-            # check that the base is in the reachable zone
-            print('grid search: ')
-            # Output the best metric and the corresponding parameters
-            print('Best metric:', best_metric)
             if viz:
+                grid = np.max(grid_data, 2) # only x and y
                 show_heatmap(grid)
             learned_base_values = best_params
         else:
@@ -1538,9 +1543,9 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
             bounds = (GRIPPER_REACHABLE_RANGE, (-math.pi, math.pi), (-math.pi, math.pi))
             initial_guess = [mean(bound) for bound in bounds]
             def objective(params, robot, model, start_pose, gripper_pose, goal_pose):
-                return -get_feasibility_estimate(
-                            params, robot, model, stats, start_pose, gripper_pose, goal_pose
-                        )
+                base_values = get_base_values(params, gripper_pose)
+                state = get_state_from_base_values(base_values, robot, stats, start_body, gripper_pose, goal_pose)
+                return -get_feasibility_estimate(model, state)
             from functools import partial
             partial_obj = partial(
                 objective, 
@@ -1563,15 +1568,11 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
             learned_base_values = maybe_flip_phi(learned_base_values, start_body)
             wait_if_gui()
                 
-        print('Best parameters:', learned_base_values)
         # check that the base is in the reachable zone
-        init_is_reachable = is_reachable(learned_base_values, gripper_pose, GRIPPER_REACHABLE_RANGE)
-        print('initial block pose reachability: ', init_is_reachable)
         goal_is_reachable = is_reachable(learned_base_values, goal_pose, BLOCK_REACHABLE_RANGE) # epsilon=0.07
-        print('goal block pose reachability: ', goal_is_reachable)
 
         # write result to write
-        with open("learned_base_values.txt", "w") as f:
+        with open(os.path.join(TEMP_SKILLS_DIR,"learned_base_values.txt"), "w") as f:
             for base_value in learned_base_values:
                 f.write(f"{base_value}\n")
         if reach_dir is not None: # for reachability test
@@ -1585,22 +1586,22 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
             time.sleep(0.2) # KLUDGE: give time before program crashes
             yield None
     else: # if not first attempt, read from file
-        with open("learned_base_values.txt", "r") as f:
+        with open(os.path.join(TEMP_SKILLS_DIR,"learned_base_values.txt"), "r") as f:
             learned_base_values = tuple(float(line.strip()) for line in f)
     while True:
         if max_attempts <= attempts: # revert to baseline
             attempts = 0
-            with open("heuristic.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "w") as f:
                 f.write("failed")
-            with open("attempts.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"attempts.txt"), "w") as f:
                 f.write("0")
-            with open("learned_base_values.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"learned_base_values.txt"), "w") as f:
                 f.write("")
             print('heuristic failed.')
             break
         attempts += 1
         reachable_base_values = None
-        for _ in range(50): # sample base pose within the reachable zone
+        for _ in range(HEURISTIC_ATTEMPTS): # sample base pose within the reachable zone
             base_values = perturb_base(learned_base_values, perturb_range=(0.0, MAX_PERTURBATION))
             if point_in_annulus(
                 base_values[0], base_values[1], gripper_pose[0][0], gripper_pose[0][1], 
@@ -1612,15 +1613,15 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
                 reachable_base_values = base_values
                 break
         if reachable_base_values is not None:
-            with open("attempts.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"attempts.txt"), "w") as f:
                 f.write(str(attempts))
             yield base_values
         else:
-            with open("heuristic.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "w") as f:
                 f.write("failed")
-            with open("attempts.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"attempts.txt"), "w") as f:
                 f.write("0")
-            with open("learned_base_values.txt", "w") as f:
+            with open(os.path.join(TEMP_SKILLS_DIR,"learned_base_values.txt"), "w") as f:
                 f.write("")
             print('heuristic failed (not reachable).')
             break
