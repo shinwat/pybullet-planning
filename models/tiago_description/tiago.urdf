@@ -608,8 +608,7 @@
     <child link="arm_3_link"/>
     <origin rpy="-1.57079632679 0.0 1.57079632679" xyz="0.0895 0.0 0.0015"/>
     <axis xyz="0 0 1"/>
-    <limit effort="17.86" lower="-3.53429173529" upper="1.8" velocity="4.58"/>
-    <!-- TODO: ORIGINALLY upper="1.57079632679" -->
+    <limit effort="17.86" lower="-3.53429173529" upper="1.57079632679" velocity="4.58"/>
     <dynamics damping="1.0" friction="1.0"/>
     <safety_controller k_position="20" k_velocity="20" soft_lower_limit="-3.51429173529" soft_upper_limit="1.55079632679"/>
   </joint>
@@ -704,8 +703,7 @@
     <child link="arm_6_link"/>
     <origin rpy="0.0 -1.57079632679 -1.57079632679" xyz="0 0 0.15"/>
     <axis xyz="0 0 1"/>
-    <limit effort="6.6" lower="-1.41371669412" upper="1.8" velocity="1.76"/>
-    <!-- TODO: ORIGINALLY upper="1.41371669412" -->
+    <limit effort="6.6" lower="-1.41371669412" upper="1.41371669412" velocity="1.76"/>
     <dynamics damping="1.0" friction="1.0"/>
     <safety_controller k_position="20" k_velocity="20" soft_lower_limit="-1.39371669412" soft_upper_limit="1.39371669412"/>
   </joint>
@@ -781,7 +779,7 @@
   <link name="gripper_right_finger_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.004470 0.010766 -0.121013"/>
-      <mass value="0.00109980"/>
+      <mass value="0.1"/>
       <inertia ixx="0.000232" ixy="-0.000005" ixz="-0.000032" iyy="0.000224" iyz="0.000036" izz="0.000029"/>
     </inertial>
     <visual>
@@ -813,7 +811,7 @@
   <link name="gripper_left_finger_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.004470 0.010766 -0.121013"/>
-      <mass value="0.00109980"/>
+      <mass value="0.1"/>
       <inertia ixx="0.000232" ixy="-0.000005" ixz="-0.000032" iyy="0.000224" iyz="0.000036" izz="0.000029"/>
     </inertial>
     <visual>
