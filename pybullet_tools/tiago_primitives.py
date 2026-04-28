@@ -777,15 +777,9 @@ class Push(Command):
                         'dones': dones,
                     }
                 else:
-                    try: # read result of heuristic usage
-                        with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r") as f:
-                            heuristic_failed = f.read() == "failed"
-                    except Exception:
-                        heuristic_failed = False
                     trajectory = {
                         'init': init_state,
                         'success': success,
-                        'heuristic': not heuristic_failed,
                         'jammed': jammed_init,
                         'logs': log_dict,
                     }
@@ -1155,6 +1149,7 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
                 with open(os.path.join(TEMP_SKILLS_DIR,"heuristic.txt"), "r") as f:
                     heuristic_failed = f.read() == "failed"
             except Exception:
+                print('could not load heuristic.txt')
                 heuristic_failed = False
             # KLDUGE: read from file to check which value function to use
             if not heuristic_failed:
@@ -1162,6 +1157,7 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
                     with open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r") as f:
                         stream_pairs = f.read()
                 except Exception:
+                    print('could not load matching_streams.txt')
                     stream_pairs = None
                 if stream_pairs is not None:
                     # filter the pairs to ones with the stream corresponding to this sampler
