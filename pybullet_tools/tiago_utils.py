@@ -25,7 +25,7 @@ TIAGO_GROUPS = {
 
 EPSILON = 1e-6
 GRASP_LENGTH = 0.
-GRIPPER_MARGIN = 0.07
+GRIPPER_MARGIN = 0.055
 MAX_GRASP_WIDTH = np.inf
 TOOL_POSE = Pose(euler=Euler(pitch=PI))
 #TODO: find actual values
