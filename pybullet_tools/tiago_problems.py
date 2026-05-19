@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from .tiago_utils import TIAGO_URDF, create_gripper, set_group_conf
 from .utils import (
@@ -81,12 +82,20 @@ class Problem(object):
         return repr(self.__dict__)
 
 
-def create_tiago(fixed_base=True, torso=0.2):
+def create_tiago(fixed_base=True, torso=0.2, max_retries=5, delay_seconds=1):
     with LockRenderer():
         with HideOutput():
-            tiago = load_model(TIAGO_URDF, fixed_base=fixed_base)
-        set_group_conf(tiago, "torso", [torso])
-    return tiago
+            for attempt in range(1, max_retries+1):
+                try:
+                    tiago = load_model(TIAGO_URDF, fixed_base=fixed_base)
+                    set_group_conf(tiago, "torso", [torso])
+                    return tiago
+                except Exception as e:
+                    if attempt == max_retries:
+                        raise
+                    print(f"Attempt {attempt} failed: {e}. "
+                        f"Retrying in {delay_seconds:.3f}s...")
+                    time.sleep(delay_seconds)
 
 
 def create_hook(
