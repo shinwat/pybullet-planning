@@ -807,6 +807,17 @@ def load_pybullet(filename, fixed_base=False, scale=1., **kwargs):
     INFO_FROM_BODY[CLIENT, body] = ModelInfo(None, filename, fixed_base, scale)
     return body
 
+def with_retries(load_pybullet, filename, max_retries=5, delay_seconds=1):
+    for attempt in range(1, max_retries+1):
+        try:
+            return load_pybullet(filename)
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            print(f"Attempt {attempt} failed: {e}. "
+                f"Retrying in {delay_seconds:.3f}s...")
+            time.sleep(delay_seconds)
+
 def set_caching(cache):
     p.setPhysicsEngineParameter(enableFileCaching=int(cache), physicsClientId=CLIENT)
 
