@@ -46,8 +46,8 @@ MAX_HORIZON = 50
 EVAL_HORIZON = 100
 PLATE_VERTICES = [[-0.135, -0.135],[0.135,-0.135],[0.135,0.135],[-0.135,0.135]]
 PLATE_RADIUS = 0.07
-HOOK_WIDTH = 0.1
-HOOK_LENGTH = 0.2
+HOOK_WIDTH = 0.08
+HOOK_LENGTH = 0.05
 MAX_JOINT_VELOCITIES = np.array([1.95, 1.95, 2.35, 2.35, 1.95, 1.95, 1.76]) # in rad/s
 ACTION_NORM_CONST = (MAX_JOINT_VELOCITIES / CONTROL_FREQ).tolist()
 GRIPPER_NORM_COST = [0.05, 0.05, 0.05, 0.05] # [m, m, rad, rad]/step
@@ -282,6 +282,7 @@ class Trajectory(Command):
             for _ in joint_controller_hold(conf.body, conf.joints, conf.values):
                 step_simulation()
                 time.sleep(dt)
+        time.sleep(0.1) # KLUDGE: helps with grasp dettachment
     def to_points(self, link=BASE_LINK):
         # TODO: this is computationally expensive
         points = []
@@ -362,8 +363,10 @@ def get_unnormalized_arm_joint_positions(body, positions):
         )
 
 #TODO: move to utils
-def is_point_in_plate(point):
-    return int(np.linalg.norm(point[:2]) < PLATE_RADIUS)
+def is_point_in_plate(point, goal=None):
+    if goal is None:
+        return int(np.linalg.norm(point[:2]) < PLATE_RADIUS)
+    return int(np.linalg.norm(np.array(point[:2]) - np.array(goal[:2])) < PLATE_RADIUS)
 
 def get_state_wrt_base(robot, body):
     tool_pose = pose2d_from_pose(get_tool_pose_wrt_base(robot))
@@ -507,8 +510,8 @@ class Push(Command):
                     gripper_y = old_gripper_pose[0][1]
                     jammed_init = gripper_y > 0 and gripper_y > block_y # if y-axis is negative, jammed
                     jammed_init = jammed_init and self.jammed
-                    if jammed_init:
-                        print('arm is jammed.')
+                    # if jammed_init:
+                        # print('arm is jammed.')
                     old_joint_value = get_joint_positions(self.robot, joints)[0]
 
                     if self.evaluate:
@@ -550,20 +553,21 @@ class Push(Command):
 
                         state = next_state
 
-                        if not self.evaluate:
+                        if not self.evaluate and buffer._size > 0:
                             log_dict = model.train(buffer)
                             logs.append([log_dict, model.total_it])
 
                         # if done or success, end before horizon is reached
                         if done:
                             if desired_joint_state is None:
-                                print("IK failed: ", i)
+                                # print("IK failed: ", i)
                                 wait_if_gui()
                             break
                     wait_if_gui()
                     if self.evaluate:
                         model.actor.train()
-                    success = is_point_in_plate(get_pose(self.body)[0]) # get_tool_pose(self.robot)[0] for reach
+                    achieved_pos = list(get_pose(self.body)[0])
+                    success = is_point_in_plate(achieved_pos, goal_state[0])
 
                     # per-episode buffer
                     if buffer is not None and buffer.__class__.__name__ == "HindsightReplayBuffer":
@@ -583,11 +587,11 @@ class Push(Command):
                         }
                         buffer.store_episode(list_to_numpy(trajectory))
 
-                    return success, jammed_init, logs
+                    return success, jammed_init, logs, np.array(achieved_pos[:-1])
                 
                 wait_if_gui()
-                success, jammed_init, log_dict = rollout_corl(self.model, self.buffer)
-                print('success:', success)
+                success, jammed_init, log_dict, achieved_pos = rollout_corl(self.model, self.buffer)
+                # print('success:', success)
 
             if not self.bootstrap:
                 states = []
@@ -654,7 +658,7 @@ class Push(Command):
 
                 # evaluate TAMP trajectory
                 print('using motion planner script.')
-                success = is_point_in_plate(get_pose(self.body)[0])
+                success = is_point_in_plate(list(get_pose(self.body)[0]), goal_state[0])
                 print('success: ', success)
 
                 if self.evaluate:
@@ -710,7 +714,7 @@ class Push(Command):
 
                 pruned_rewards = rewards[first_index:last_index+1] ##
                 pruned_dones = dones[first_index:last_index+1] ##
-                print('dones: ', pruned_dones)
+                # print('dones: ', pruned_dones)
 
 
                 # condition states to goal
@@ -744,6 +748,7 @@ class Push(Command):
                         'success': success,
                         'jammed': jammed_init,
                         'logs': log_dict,
+                        'achieved': achieved_pos,
                     }
             return trajectory
     def reverse(self):
@@ -865,7 +870,6 @@ def get_push_gen(problem, collisions=True, max_attempts=25, ignore_traj=False, e
     return fn
 
 # generate hook pose
-#TODO: return Pose object instead of Posee
 def get_hook_gen(problem, collisions=True):
     def fn(*inputs):
         o, r, p0, p1 = inputs # p0: current block pose | p1: goal block pose
@@ -873,17 +877,21 @@ def get_hook_gen(problem, collisions=True):
         approach_vector = APPROACH_DISTANCE*get_unit_vector([0, 0, -1])
         x = np.sign(p0.value[0][0] - p1.value[0][0])
         y = np.sign(p0.value[0][1] - p1.value[0][1])
-        if (x > 0):
-            flip = 0
-        else:
-            flip = math.pi
+        flip = 0 if (x > 0) else math.pi
         h = Posee(point=Point(
             x=p0.value[0][0]-HOOK_LENGTH*x,
             y=p0.value[0][1]+HOOK_WIDTH*y,
             z=p0.value[0][-1]+GRASP_LENGTH), 
             euler=Euler(0, 0, flip))
+        hg = Posee(point=Point(
+            x=p1.value[0][0]-HOOK_LENGTH*x,
+            y=p1.value[0][1]+HOOK_WIDTH*y,
+            z=p1.value[0][-1]+GRASP_LENGTH), 
+            euler=Euler(0, 0, flip))
+        p3 = Pose(r, h)
+        p4 = Pose(r, hg)
         grasp = Grasp('top', r, h, multiply((approach_vector, unit_quat()), h), get_carry_conf('top'))
-        return (h,grasp) # return the pose and the grasp 
+        return (p3, p4, grasp) # return the pose and the grasp 
     return fn
 
 # generate sweeping trajectory
@@ -892,21 +900,20 @@ def get_sweep_gen(problem, collisions=True):
     robot = problem.robot
     obstacles = problem.movable if collisions else []
     def fn(*inputs):
-        _, o, p1, p2, p3, g, bq, q = inputs # p2 is object goal pose, p3 is hook pose
+        _, o, p1, p2, p3, p4, g, bq, q = inputs # p2 is object goal pose, p3 is hook pose
         blocks = list(filter(lambda b: b != o and b != problem.tools[0], obstacles)) #TODO: remove tools
         bq.assign # base conf
         set_joint_positions(robot, q.joints, q.values) # arm conf
-        gripper_pose = Posee(point=Point(
-            x=p3[0][0] + p2.value[0][0] - p1.value[0][0],
-            y=p3[0][1] + p2.value[0][1] - p1.value[0][1],
-            z=p3[0][-1]),
-            euler=euler_from_quat(get_tool_pose(robot)[-1])) # keep the gripper orientation
-        print(gripper_pose)
+        gripper_pose = Posee(
+            point=p4.value[0],
+            euler=euler_from_quat(get_tool_pose(robot)[-1])
+        ) # keep the gripper orientation
+        # print(gripper_pose)
         arm_link = get_gripper_link(robot)
         arm_joints = get_arm_joints(robot)
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, gripper_pose)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in blocks):
-            print('Approach IK failure', approach_conf)
+            # print('Approach IK failure', approach_conf)
             return None
         approach_conf = get_joint_positions(robot, arm_joints)
         attachment = g.get_attachment(problem.robot)
@@ -926,21 +933,18 @@ def get_sweep_gen(problem, collisions=True):
     return fn
 
 # new ik_ir_traj_gen to account for length of the hook
-def get_hook_ik_ir_traj_gen(problem, max_attempts=25, collisions=True,learned=False, teleport=False, **kwargs):
-    ir_sampler = get_ir_sampler(problem, collisions=collisions, learned=learned, max_attempts=max_attempts, **kwargs)
+def get_hook_ik_ir_traj_gen(problem,  stream_name=None, skill_modules=None, max_attempts=25, collisions=True, teleport=False, stats=None, reach_dir=None, grid_search=True, viz=False, **kwargs):
+    ir_sampler = get_ir2_sampler(problem, max_attempts=max_attempts, stream_name=stream_name, skill_modules=skill_modules, stats=stats, reach_dir=reach_dir, grid_search=grid_search, viz=viz, **kwargs)
     ik_fn = get_ik_arm_fn(problem, collisions=collisions, teleport=teleport, **kwargs)
     grasp_fn = get_grasp_gen(problem, collisions=collisions)
     def gen(*inputs):
-        arm, hook, g1, block, p1, p2, p3, _ = inputs
-        p3 = Pose(hook, p3) #KLUDGE: pretend like the object is where the hook moves to
-        p3.assign()
-        (g2,) = grasp_fn(hook)[0]
-        ir_generator = ir_sampler(arm, hook, p3, g2)
+        arm, hook, g1, block, p1, p2, p3, p4, _ = inputs
+        ir_generator = ir_sampler(arm, hook, p3, p4, g1) # instead of p3, p2
         attempts = 0
         while True:
             if max_attempts <= attempts:
                 if not p3.init:
-                    print("pose not initialized")
+                    # print("pose not initialized")
                     return
                 attempts = 0
                 yield None
@@ -952,11 +956,11 @@ def get_hook_ik_ir_traj_gen(problem, max_attempts=25, collisions=True,learned=Fa
             if ir_outputs is None:
                 print("no IR found")
                 continue
-            new_inputs = (arm, hook, p3, g2)
+            new_inputs = (arm, hook, p3, g1)
             ik_outputs = ik_fn(*(new_inputs + ir_outputs))
             if ik_outputs is None:
                 continue
-            print('IK attempts:', attempts)
+            # print('IK attempts:', attempts)
             yield ir_outputs + ik_outputs
             return
     return gen
@@ -979,8 +983,8 @@ def get_ik_arm_fn(problem, custom_limits={}, collisions=True, teleport=False):
         set_joint_positions(robot, arm_joints, default_conf)
         grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
-            if grasp_conf is not None:
-               print('Grasp IK failure', grasp_conf)
+            # if grasp_conf is not None:
+            #    print('Grasp IK failure', grasp_conf)
             return None
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
@@ -1115,6 +1119,8 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
                 heuristic_failed = False
             # KLDUGE: read from file to check which value function to use
             if not heuristic_failed:
+                # skill_model = skill_modules['push']['plan-push-motion'] # for push only 
+                # skill_model = skill_modules['sweep']['plan-sweep-motion'] # for sweep only
                 try:
                     with open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r") as f:
                         stream_pairs = f.read()
@@ -1124,7 +1130,6 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
                 if stream_pairs is not None:
                     # filter the pairs to ones with the stream corresponding to this sampler
                     skill_model = recover_skill_model_from_stream_pairs(stream_pairs, skill_modules, stream_name)
-              # skill_model = skill_modules['push']['plan_push_motion'].vf.v # expected
         if skill_model is not None:
            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, skill_model, stats, reach_dir, grid_search=grid_search, viz=viz)
         else:
@@ -1169,8 +1174,8 @@ def get_ik_fn(problem, custom_limits={}, collisions=True, teleport=False):
         set_joint_positions(robot, arm_joints, default_conf)
         grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
-            if grasp_conf is not None:
-               print('Grasp IK failure', grasp_conf)
+            # if grasp_conf is not None:
+            #    print('Grasp IK failure', grasp_conf)
             return None
         approach_conf = sub_inverse_kinematics(robot, arm_joints[0], arm_link, approach_pose, custom_limits=custom_limits)
         if (approach_conf is None) or any(pairwise_collision(robot, b) for b in obstacles + [obj]):
@@ -1229,7 +1234,7 @@ def get_ik_ir_gen(problem, max_attempts=25, collisions=True,learned=False, telep
             ik_outputs = ik_fn(*(inputs + ir_outputs))
             if ik_outputs is None:
                 continue
-            print('IK attempts:', attempts)
+            # print('IK attempts:', attempts)
             yield ir_outputs + ik_outputs
             return
     return gen
@@ -1280,8 +1285,8 @@ def get_ik_traj_fn(problem, custom_limits={}, collisions=True, teleport=False):
         set_joint_positions(robot, arm_joints, default_conf)
         grasp_conf = tiago_inverse_kinematics(robot, gripper_pose, custom_limits=custom_limits)
         if (grasp_conf is None) or any(pairwise_collision(robot, b) for b in obstacles):
-            if grasp_conf is not None:
-               print('Grasp IK failure', grasp_conf)
+            # if grasp_conf is not None:
+            #    print('Grasp IK failure', grasp_conf)
             return None
         attachment = grasp.get_attachment(problem.robot)
         attachments = {attachment.child: attachment}
@@ -1550,7 +1555,7 @@ def learned_pose_generator(robot, start_body, gripper_pose, goal_pose, model, st
                 f.write("0")
             with open(os.path.join(TEMP_SKILLS_DIR,"learned_base_values.txt"), "w") as f:
                 f.write("")
-            print('heuristic failed.')
+            # print('heuristic failed.')
             break
         attempts += 1
         reachable_base_values = None
