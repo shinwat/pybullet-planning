@@ -1117,19 +1117,24 @@ def get_ir2_sampler(problem, custom_limits={}, max_attempts=100, stream_name=Non
             except Exception:
                 print('could not load heuristic.txt')
                 heuristic_failed = False
-            # KLDUGE: read from file to check which value function to use
+            # read from file to check which value function to use
             if not heuristic_failed:
-                # skill_model = skill_modules['push']['plan-push-motion'] # for push only 
-                # skill_model = skill_modules['sweep']['plan-sweep-motion'] # for sweep only
-                try:
-                    with open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r") as f:
-                        stream_pairs = f.read()
-                except Exception:
-                    print('could not load matching_streams.txt')
-                    stream_pairs = None
-                if stream_pairs is not None:
-                    # filter the pairs to ones with the stream corresponding to this sampler
-                    skill_model = recover_skill_model_from_stream_pairs(stream_pairs, skill_modules, stream_name)
+                inner = list(skill_modules.values())[0] # get inner dict of any skill
+                skill_stream = list(inner.keys())[0] # get name of the stream associated with a skill
+                if skill_stream == 'push-only':
+                    skill_model = skill_modules['push'][skill_stream] # for push only 
+                elif skill_stream == 'sweep-only':
+                    skill_model = skill_modules['sweep'][skill_stream] # for sweep only
+                else:
+                    try:
+                        with open(os.path.join(TEMP_SKILLS_DIR,"matching_streams.txt"), "r") as f:
+                            stream_pairs = f.read()
+                    except Exception:
+                        print('could not load matching_streams.txt')
+                        stream_pairs = None
+                    if stream_pairs is not None:
+                        # filter the pairs to ones with the stream corresponding to this sampler
+                        skill_model = recover_skill_model_from_stream_pairs(stream_pairs, skill_modules, stream_name)
         if skill_model is not None:
            base_generator = learned_pose_generator(robot, obj, gripper_pose, end_pose.value, skill_model, stats, reach_dir, grid_search=grid_search, viz=viz)
         else:
